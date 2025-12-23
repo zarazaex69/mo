@@ -1,0 +1,24 @@
+server:
+  port: 8080
+  host: 0.0.0.0
+  debug: false
+  version: 0.1.0
+
+upstream:
+  protocol: "https:"
+  host: chat.z.ai
+  token: ""  # Set via ZAI_TOKEN env variable
+  anonymous: true
+
+model:
+  default: GLM-4-6-API-V1
+  think_mode: reasoning  # Options: reasoning, think, strip, details
+
+headers:
+  accept: "*/*"
+  accept_language: en-US
+  user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+  sec_ch_ua: '"Chromium";v="141", "Not?A_Brand";v="8"'
+  sec_ch_ua_mobile: "?0"
+  sec_ch_ua_platform: "Linux"
+  x_fe_version: prod-fe-1.0.117

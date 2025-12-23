@@ -17,10 +17,10 @@ Mo is a reverse ingenereed neuro server
 
 ```bash
 # build the mo 
-make build
+go build ./cmd/mo
 
 # start the mo
-./build/mo
+./mo
 ```
 
 <div align="center">
