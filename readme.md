@@ -5,7 +5,7 @@
 <div align="center">
 
 ![Golang](https://img.shields.io/badge/-Golang-0D1117?style=flat-square&logo=go&logoColor=00A7D0)
-
+![License](https://img.shields.io/badge/license-BSD--2--Clause-0D1117?style=flat-square&logo=open-source-initiative&logoColor=green&labelColor=0D1117)
 
 </div>
 
