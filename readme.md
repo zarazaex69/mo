@@ -34,5 +34,7 @@ Telegram: [zarazaex](https://t.me/zarazaexe)
 Email: [zarazaex@tuta.io](mailto:zarazaex@tuta.io)
 <br>
 Site: [zarazaex.xyz](https://zarazaex.xyz)
+<br>
+By mizopako, clone of zik srv
 
 </div>
