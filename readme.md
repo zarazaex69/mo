@@ -35,6 +35,6 @@ Email: [zarazaex@tuta.io](mailto:zarazaex@tuta.io)
 <br>
 Site: [zarazaex.xyz](https://zarazaex.xyz)
 <br>
-By mizopako, clone of zik srv
+By mizopako, clone of zik srv, in now - not by zarazaex
 
 </div>
