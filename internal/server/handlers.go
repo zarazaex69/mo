@@ -190,20 +190,18 @@ func handleNonStreamingResponse(w http.ResponseWriter, resp *http.Response, req 
 	// Consume the entire stream to aggregate the full response object.
 	// Even for non-streaming requests, we parse the upstream SSE to construct the final JSON.
 	for zaiResp := range zlm.ParseSSEStream(resp) {
+		delta := zlm.FormatResponse(zaiResp, cfg)
+		if delta != nil {
+			if content, ok := delta["content"].(string); ok {
+				contentParts = append(contentParts, content)
+			}
+			if reasoningContent, ok := delta["reasoning_content"].(string); ok {
+				reasoningParts = append(reasoningParts, reasoningContent)
+			}
+		}
+
 		if zaiResp.Data != nil && zaiResp.Data.Done {
 			break
-		}
-
-		delta := zlm.FormatResponse(zaiResp, cfg)
-		if delta == nil {
-			continue
-		}
-
-		if content, ok := delta["content"].(string); ok {
-			contentParts = append(contentParts, content)
-		}
-		if reasoningContent, ok := delta["reasoning_content"].(string); ok {
-			reasoningParts = append(reasoningParts, reasoningContent)
 		}
 	}
 
