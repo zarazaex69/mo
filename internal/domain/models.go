@@ -78,6 +78,41 @@ type User struct {
 	Token string
 }
 
+// file upload response from /api/v1/files/
+type UploadedFile struct {
+	ID        string           `json:"id"`
+	UserID    string           `json:"user_id"`
+	Hash      *string          `json:"hash"`
+	Filename  string           `json:"filename"`
+	Data      map[string]any   `json:"data"`
+	Meta      UploadedFileMeta `json:"meta"`
+	CreatedAt int64            `json:"created_at"`
+	UpdatedAt int64            `json:"updated_at"`
+}
+
+type UploadedFileMeta struct {
+	Name        string         `json:"name"`
+	ContentType string         `json:"content_type"`
+	Size        int64          `json:"size"`
+	Data        map[string]any `json:"data"`
+	OssEndpoint string         `json:"oss_endpoint"`
+	CdnURL      string         `json:"cdn_url"`
+}
+
+// file attachment for chat request
+type FileAttachment struct {
+	Type   string        `json:"type"`
+	File   *UploadedFile `json:"file"`
+	ID     string        `json:"id"`
+	URL    string        `json:"url"`
+	Name   string        `json:"name"`
+	Status string        `json:"status"`
+	Size   int64         `json:"size"`
+	Error  string        `json:"error"`
+	ItemID string        `json:"itemId"`
+	Media  string        `json:"media"`
+}
+
 type HealthResponse struct {
 	Status  string `json:"status"`
 	Version string `json:"version"`

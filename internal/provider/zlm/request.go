@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"strings"
 	"time"
 
@@ -27,7 +28,9 @@ func FormatRequest(req *domain.ChatRequest, cfg *config.Config) (map[string]inte
 	}
 
 	var msgs []map[string]interface{}
+	var files []domain.FileAttachment
 	chatID := utils.GenerateRequestID()
+	userMsgID := utils.GenerateRequestID()
 
 	for _, msg := range req.Messages {
 		newMsg := map[string]interface{}{"role": msg.Role}
@@ -40,7 +43,7 @@ func FormatRequest(req *domain.ChatRequest, cfg *config.Config) (map[string]inte
 
 		// multimodal array
 		if arr, ok := msg.Content.([]interface{}); ok {
-			var content interface{} = ""
+			var textContent string
 
 			for _, item := range arr {
 				m, ok := item.(map[string]interface{})
@@ -52,7 +55,7 @@ func FormatRequest(req *domain.ChatRequest, cfg *config.Config) (map[string]inte
 
 				if itemType == "text" {
 					if t, ok := m["text"].(string); ok {
-						content = t
+						textContent = t
 					}
 					continue
 				}
@@ -69,33 +72,33 @@ func FormatRequest(req *domain.ChatRequest, cfg *config.Config) (map[string]inte
 						continue
 					}
 
-					// upload if base64
-					uploaded, err := UploadImage(mediaURL, chatID, cfg)
+					// upload if base64 and get full metadata
+					uploaded, err := UploadImageFull(mediaURL, chatID, cfg)
 					if err != nil {
 						logger.Warn().Err(err).Msg("image upload failed")
 						continue
 					}
-					if uploaded != "" {
-						mediaURL = uploaded
-					}
 
-					// convert to array if needed
-					if s, ok := content.(string); ok {
-						content = []map[string]interface{}{
-							{"type": "text", "text": s},
+					if uploaded != nil {
+						// build file attachment in z.ai format
+						attachment := domain.FileAttachment{
+							Type:   "image",
+							File:   uploaded,
+							ID:     uploaded.ID,
+							URL:    fmt.Sprintf("/api/v1/files/%s/content", uploaded.ID),
+							Name:   uploaded.Filename,
+							Status: "uploaded",
+							Size:   uploaded.Meta.Size,
+							Error:  "",
+							ItemID: utils.GenerateRequestID(),
+							Media:  "image",
 						}
-					}
-					if slice, ok := content.([]map[string]interface{}); ok {
-						slice = append(slice, map[string]interface{}{
-							"type":      "image_url",
-							"image_url": map[string]interface{}{"url": mediaURL},
-						})
-						content = slice
+						files = append(files, attachment)
 					}
 				}
 			}
 
-			newMsg["content"] = content
+			newMsg["content"] = textContent
 			msgs = append(msgs, newMsg)
 		}
 	}
@@ -104,6 +107,30 @@ func FormatRequest(req *domain.ChatRequest, cfg *config.Config) (map[string]inte
 	result["messages"] = msgs
 	result["stream"] = true
 	result["params"] = map[string]interface{}{}
+
+	// add files if any
+	if len(files) > 0 {
+		// add ref to user message
+		filesWithRef := make([]map[string]interface{}, len(files))
+		for i, f := range files {
+			filesWithRef[i] = map[string]interface{}{
+				"type":   f.Type,
+				"file":   f.File,
+				"id":     f.ID,
+				"url":    f.URL,
+				"name":   f.Name,
+				"status": f.Status,
+				"size":   f.Size,
+				"error":  f.Error,
+				"itemId": f.ItemID,
+				"media":  f.Media,
+				// link to user message
+				"ref_user_msg_id": userMsgID,
+			}
+		}
+		result["files"] = filesWithRef
+		result["current_user_message_id"] = userMsgID
+	}
 
 	if len(req.Tools) > 0 {
 		tools := make([]map[string]interface{}, len(req.Tools))
@@ -132,44 +159,65 @@ func FormatRequest(req *domain.ChatRequest, cfg *config.Config) (map[string]inte
 	return result, nil
 }
 
-func UploadImage(dataURL, chatID string, cfg *config.Config) (string, error) {
+// UploadImageFull uploads image and returns full file metadata
+func UploadImageFull(dataURL, chatID string, cfg *config.Config) (*domain.UploadedFile, error) {
 	if !strings.HasPrefix(dataURL, "data:") {
-		return "", nil
+		return nil, nil
 	}
 
 	parts := strings.SplitN(dataURL, ",", 2)
 	if len(parts) != 2 {
-		return "", fmt.Errorf("invalid data url")
+		return nil, fmt.Errorf("invalid data url")
+	}
+
+	// extract content type from data url
+	contentType := "image/png"
+	ext := "png"
+	if strings.Contains(parts[0], "image/jpeg") {
+		contentType = "image/jpeg"
+		ext = "jpg"
+	} else if strings.Contains(parts[0], "image/gif") {
+		contentType = "image/gif"
+		ext = "gif"
+	} else if strings.Contains(parts[0], "image/webp") {
+		contentType = "image/webp"
+		ext = "webp"
 	}
 
 	imgData, err := base64.StdEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "", fmt.Errorf("decode base64: %w", err)
+		return nil, fmt.Errorf("decode base64: %w", err)
 	}
 
-	filename := utils.GenerateID()
+	filename := fmt.Sprintf("%s.%s", utils.GenerateID(), ext)
 
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
-	part, err := writer.CreateFormFile("file", filename)
+
+	// create form file with proper content type
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, filename))
+	h.Set("Content-Type", contentType)
+
+	part, err := writer.CreatePart(h)
 	if err != nil {
-		return "", fmt.Errorf("create form: %w", err)
+		return nil, fmt.Errorf("create form: %w", err)
 	}
 	if _, err := io.Copy(part, bytes.NewReader(imgData)); err != nil {
-		return "", fmt.Errorf("write file: %w", err)
+		return nil, fmt.Errorf("write file: %w", err)
 	}
 	writer.Close()
 
 	authSvc := auth.NewService()
 	user, err := authSvc.GetUser(cfg)
 	if err != nil {
-		return "", fmt.Errorf("get user: %w", err)
+		return nil, fmt.Errorf("get user: %w", err)
 	}
 
 	uploadURL := fmt.Sprintf("%s//%s/api/v1/files/", cfg.Upstream.Protocol, cfg.Upstream.Host)
 	req, err := http.NewRequest("POST", uploadURL, body)
 	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
+		return nil, fmt.Errorf("create request: %w", err)
 	}
 
 	for k, v := range cfg.GetUpstreamHeaders() {
@@ -182,22 +230,37 @@ func UploadImage(dataURL, chatID string, cfg *config.Config) (string, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("upload: %w", err)
+		return nil, fmt.Errorf("upload: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("upload failed %d: %s", resp.StatusCode, string(b))
+		return nil, fmt.Errorf("upload failed %d: %s", resp.StatusCode, string(b))
 	}
 
-	var result struct {
-		ID       string `json:"id"`
-		Filename string `json:"filename"`
-	}
+	var result domain.UploadedFile
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("decode response: %w", err)
+		return nil, fmt.Errorf("decode response: %w", err)
 	}
 
-	return fmt.Sprintf("%s_%s", result.ID, result.Filename), nil
+	logger.Debug().
+		Str("id", result.ID).
+		Str("filename", result.Filename).
+		Str("cdn_url", result.Meta.CdnURL).
+		Msg("image uploaded")
+
+	return &result, nil
+}
+
+// UploadImage legacy wrapper for backward compat
+func UploadImage(dataURL, chatID string, cfg *config.Config) (string, error) {
+	file, err := UploadImageFull(dataURL, chatID, cfg)
+	if err != nil {
+		return "", err
+	}
+	if file == nil {
+		return "", nil
+	}
+	return fmt.Sprintf("%s_%s", file.ID, file.Filename), nil
 }
