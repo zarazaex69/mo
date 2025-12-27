@@ -13,49 +13,49 @@ func init() {
 	validate = validator.New()
 }
 
-// Validate validates a struct using validator tags
 func Validate(s interface{}) error {
-	if err := validate.Struct(s); err != nil {
-		if validationErrors, ok := err.(validator.ValidationErrors); ok {
-			return formatValidationErrors(validationErrors)
-		}
-		return err
+	err := validate.Struct(s)
+	if err == nil {
+		return nil
 	}
-	return nil
+
+	if errs, ok := err.(validator.ValidationErrors); ok {
+		return formatErrors(errs)
+	}
+	return err
 }
 
-// formatValidationErrors converts validator errors to a readable format
-func formatValidationErrors(errs validator.ValidationErrors) error {
-	var messages []string
-	for _, err := range errs {
-		messages = append(messages, formatFieldError(err))
+func formatErrors(errs validator.ValidationErrors) error {
+	var msgs []string
+	for _, e := range errs {
+		msgs = append(msgs, formatFieldError(e))
 	}
-	return fmt.Errorf("validation failed: %s", strings.Join(messages, "; "))
+	return fmt.Errorf("validation failed: %s", strings.Join(msgs, "; "))
 }
 
-// formatFieldError formats a single field validation error
-func formatFieldError(err validator.FieldError) string {
-	field := err.Field()
-	tag := err.Tag()
+func formatFieldError(e validator.FieldError) string {
+	field := e.Field()
+	tag := e.Tag()
+	param := e.Param()
 
 	switch tag {
 	case "required":
 		return fmt.Sprintf("field '%s' is required", field)
 	case "min":
-		return fmt.Sprintf("field '%s' must have at least %s items", field, err.Param())
+		return fmt.Sprintf("field '%s' must have at least %s items", field, param)
 	case "max":
-		return fmt.Sprintf("field '%s' must have at most %s items", field, err.Param())
+		return fmt.Sprintf("field '%s' must have at most %s items", field, param)
 	case "gte":
-		return fmt.Sprintf("field '%s' must be >= %s", field, err.Param())
+		return fmt.Sprintf("field '%s' must be >= %s", field, param)
 	case "lte":
-		return fmt.Sprintf("field '%s' must be <= %s", field, err.Param())
+		return fmt.Sprintf("field '%s' must be <= %s", field, param)
 	case "gt":
-		return fmt.Sprintf("field '%s' must be > %s", field, err.Param())
+		return fmt.Sprintf("field '%s' must be > %s", field, param)
 	case "lt":
-		return fmt.Sprintf("field '%s' must be < %s", field, err.Param())
+		return fmt.Sprintf("field '%s' must be < %s", field, param)
 	case "oneof":
-		return fmt.Sprintf("field '%s' must be one of: %s", field, err.Param())
+		return fmt.Sprintf("field '%s' must be one of: %s", field, param)
 	default:
-		return fmt.Sprintf("field '%s' failed validation '%s'", field, tag)
+		return fmt.Sprintf("field '%s' failed '%s'", field, tag)
 	}
 }

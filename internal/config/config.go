@@ -11,7 +11,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config holds all application configuration
 type Config struct {
 	Server   ServerConfig   `yaml:"server"`
 	Upstream UpstreamConfig `yaml:"upstream"`
@@ -19,7 +18,6 @@ type Config struct {
 	Headers  HeadersConfig  `yaml:"headers"`
 }
 
-// ServerConfig holds HTTP server configuration
 type ServerConfig struct {
 	Port    int    `yaml:"port"`
 	Host    string `yaml:"host"`
@@ -27,21 +25,17 @@ type ServerConfig struct {
 	Version string `yaml:"version"`
 }
 
-// UpstreamConfig holds Z.AI API configuration
 type UpstreamConfig struct {
 	Protocol string `yaml:"protocol"`
 	Host     string `yaml:"host"`
 	Token    string `yaml:"token"`
-	// Anonymous removed as we strictly require token
 }
 
-// ModelConfig holds AI model configuration
 type ModelConfig struct {
 	Default   string `yaml:"default"`
-	ThinkMode string `yaml:"think_mode"` // reasoning, think, strip, details
+	ThinkMode string `yaml:"think_mode"`
 }
 
-// HeadersConfig holds HTTP headers for upstream requests
 type HeadersConfig struct {
 	Accept          string `yaml:"accept"`
 	AcceptLanguage  string `yaml:"accept_language"`
@@ -57,7 +51,6 @@ var (
 	once sync.Once
 )
 
-// Load loads configuration from file and environment variables
 func Load(configPath string) (*Config, error) {
 	var err error
 	once.Do(func() {
@@ -66,40 +59,32 @@ func Load(configPath string) (*Config, error) {
 	return cfg, err
 }
 
-// Get returns the singleton config instance
 func Get() *Config {
 	if cfg == nil {
-		// Fallback to default config if not loaded
 		cfg, _ = loadConfig("")
 	}
 	return cfg
 }
 
 func loadConfig(configPath string) (*Config, error) {
-	// Load .env file first (ignore error if not exists)
 	_ = godotenv.Load()
 
-	// Initialize with default configuration first
 	c := defaultConfig()
 
-	// Try to load from YAML file if provided
 	if configPath != "" {
 		data, err := os.ReadFile(configPath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read config file: %w", err)
+			return nil, fmt.Errorf("read config: %w", err)
 		}
-		// Unmarshal YAML on top of default configuration
 		if err := yaml.Unmarshal(data, c); err != nil {
-			return nil, fmt.Errorf("failed to parse config file: %w", err)
+			return nil, fmt.Errorf("parse config: %w", err)
 		}
 	}
 
-	// Override with environment variables
 	c.applyEnvOverrides()
 
-	// Validate configuration
 	if err := c.validate(); err != nil {
-		return nil, fmt.Errorf("invalid configuration: %w", err)
+		return nil, err
 	}
 
 	return c, nil
@@ -135,7 +120,6 @@ func defaultConfig() *Config {
 }
 
 func (c *Config) applyEnvOverrides() {
-	// Server overrides
 	if port := getEnvInt("PORT", 0); port != 0 {
 		c.Server.Port = port
 	}
@@ -146,12 +130,10 @@ func (c *Config) applyEnvOverrides() {
 		c.Server.Debug = debug
 	}
 
-	// Upstream overrides
 	if token := getEnv("ZAI_TOKEN", ""); token != "" {
 		c.Upstream.Token = strings.TrimSpace(token)
 	}
 
-	// Model overrides
 	if model := getEnv("MODEL", ""); model != "" {
 		c.Model.Default = model
 	}
@@ -161,35 +143,30 @@ func (c *Config) applyEnvOverrides() {
 }
 
 func (c *Config) validate() error {
-	// Validate server port
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
-		return fmt.Errorf("invalid server port: %d (must be 1-65535)", c.Server.Port)
+		return fmt.Errorf("invalid port: %d", c.Server.Port)
 	}
 
-	// Validate think mode
-	validThinkModes := []string{"reasoning", "think", "strip", "details"}
+	validModes := []string{"reasoning", "think", "strip", "details"}
 	valid := false
-	for _, mode := range validThinkModes {
-		if c.Model.ThinkMode == mode {
+	for _, m := range validModes {
+		if c.Model.ThinkMode == m {
 			valid = true
 			break
 		}
 	}
 	if !valid {
-		return fmt.Errorf("invalid think mode: %s (must be one of: %v)", c.Model.ThinkMode, validThinkModes)
+		return fmt.Errorf("invalid think_mode: %s", c.Model.ThinkMode)
 	}
 
-	// Enforce strict token presence to prevent unauthorized access.
-	// Unlike development modes, the production configuration explicitly disables anonymous access
-	// to ensure all requests are actionable, billable, and traceable to a valid user account.
+	// token is required in strict mode
 	if c.Upstream.Token == "" {
-		return fmt.Errorf("upstream token (ZAI_TOKEN) is required in this strict mode")
+		return fmt.Errorf("ZAI_TOKEN is required")
 	}
 
 	return nil
 }
 
-// GetUpstreamHeaders returns headers for upstream Z.AI requests
 func (c *Config) GetUpstreamHeaders() map[string]string {
 	return map[string]string{
 		"Accept":             c.Headers.Accept,
@@ -210,27 +187,25 @@ func (c *Config) GetUpstreamHeaders() map[string]string {
 	}
 }
 
-// Helper functions
-
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
+func getEnv(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
-	return defaultValue
+	return def
 }
 
-func getEnvInt(key string, defaultValue int) int {
-	if value := os.Getenv(key); value != "" {
-		if intValue, err := strconv.Atoi(value); err == nil {
-			return intValue
+func getEnvInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			return i
 		}
 	}
-	return defaultValue
+	return def
 }
 
-func getEnvBool(key string, defaultValue bool) bool {
-	if value := os.Getenv(key); value != "" {
-		return strings.ToLower(value) == "true" || value == "1"
+func getEnvBool(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		return strings.ToLower(v) == "true" || v == "1"
 	}
-	return defaultValue
+	return def
 }

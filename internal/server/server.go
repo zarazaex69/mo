@@ -41,11 +41,12 @@ func (s *Server) setupRoutes() {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
+	s.router.Get("/v1/models", ListModels(s.cfg))
 	s.router.Post("/v1/chat/completions", ChatCompletions(s.cfg, s.aiClient, s.tokenizer))
 }
 
 func (s *Server) Start() error {
 	addr := fmt.Sprintf("%s:%d", s.cfg.Server.Host, s.cfg.Server.Port)
-	logger.Info().Msgf("Server starting on %s", addr)
+	logger.Info().Msgf("listening on %s", addr)
 	return http.ListenAndServe(addr, s.router)
 }

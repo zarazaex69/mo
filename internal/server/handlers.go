@@ -15,65 +15,51 @@ import (
 	"github.com/zarazaex69/mo/internal/provider/zlm"
 )
 
-// Define AIClienter interface here for now, or use zlm.Client directly
-// Using zlm.Client directly for simplification as per instruction to port zlm logic.
-// If multi-provider needed, we would use an interface.
 type AIClienter interface {
 	SendChatRequest(req *domain.ChatRequest, chatID string) (*http.Response, error)
 }
 
-// ChatCompletions orchestrates the request lifecycle for chat interactions, validating inputs,
-// dispatching to the AI provider, and managing the response stream or synchronization.
-// It serves as the primary entry point for the /v1/chat/completions endpoint.
 func ChatCompletions(cfg *config.Config, aiClient AIClienter, tokenizer utils.Tokener) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Deserialize the incoming JSON payload into the domain model.
 		var req domain.ChatRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "Invalid JSON request")
 			return
 		}
 
-		// Enforce strict validation rules (required fields, range checks) to fail fast on invalid inputs.
 		if err := validator.Validate(&req); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
-		// Apply configuration defaults to ensure predictable behavior when optional fields are omitted.
 		if req.Model == "" {
 			req.Model = cfg.Model.Default
 		}
 
-		// optimized tracking ID for distributed tracing across services.
 		chatID := utils.GenerateRequestID()
 
 		logger.Info().
 			Str("model", req.Model).
 			Bool("stream", req.Stream).
 			Int("messages", len(req.Messages)).
-			Msg("Processing chat completion request")
+			Msg("chat request")
 
-		// Delegate the heavy lifting to the AI provider client, abstracting the upstream communication.
 		resp, err := aiClient.SendChatRequest(&req, chatID)
 		if err != nil {
-			logger.Error().Err(err).Msg("Failed to send chat request")
+			logger.Error().Err(err).Msg("request failed")
 			writeError(w, http.StatusInternalServerError, "Failed to process request")
 			return
 		}
 
-		// Branch execution based on whether the client requested a streaming response or a single atomic response.
 		if req.Stream {
-			handleStreamingResponse(w, resp, &req, cfg, tokenizer)
+			handleStream(w, resp, &req, cfg, tokenizer)
 		} else {
-			handleNonStreamingResponse(w, resp, &req, cfg, tokenizer)
+			handleNonStream(w, resp, &req, cfg, tokenizer)
 		}
 	}
 }
 
-func handleStreamingResponse(w http.ResponseWriter, resp *http.Response, req *domain.ChatRequest, cfg *config.Config, tokenizer utils.Tokener) {
-	// Verify that the ResponseWriter supports flushing, which is essential for SSE to work correctly.
-	// Without this, the client would not receive events in real-time.
+func handleStream(w http.ResponseWriter, resp *http.Response, req *domain.ChatRequest, cfg *config.Config, tokenizer utils.Tokener) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "Streaming not supported")
@@ -84,82 +70,69 @@ func handleStreamingResponse(w http.ResponseWriter, resp *http.Response, req *do
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	// Accumulate content parts to calculate total token usage at the end of the stream if requested.
 	var contentParts []string
 	includeUsage := req.StreamOpts != nil && req.StreamOpts.IncludeUsage
 
-	// Pre-calculate prompt tokens to avoid recalculating on every chunk.
 	promptTokens := 0
 	if includeUsage {
 		promptTokens = zlm.CountTokens(req.Messages, tokenizer)
 	}
 
-	// Iterate over the parsed SSE stream from the provider.
 	for zaiResp := range zlm.ParseSSEStream(resp) {
 		delta := zlm.FormatResponse(zaiResp, cfg)
 		if delta == nil {
 			continue
 		}
 
-		// Aggregate content for usage reporting.
 		if includeUsage {
-			if content, ok := delta["content"].(string); ok {
-				contentParts = append(contentParts, content)
+			if c, ok := delta["content"].(string); ok {
+				contentParts = append(contentParts, c)
 			}
-			if reasoningContent, ok := delta["reasoning_content"].(string); ok {
-				contentParts = append(contentParts, reasoningContent)
+			if r, ok := delta["reasoning_content"].(string); ok {
+				contentParts = append(contentParts, r)
 			}
 		}
 
-		// Construct the chunk payload adhering to the OpenAI delta format.
-		deltaResponse := &domain.ResponseMessage{
-			Role:             getStringFromMap(delta, "role"),
-			Content:          getStringFromMap(delta, "content"),
-			ReasoningContent: getStringFromMap(delta, "reasoning_content"),
-			ToolCall:         getStringFromMap(delta, "tool_call"),
+		deltaMsg := &domain.ResponseMessage{
+			Role:             getStr(delta, "role"),
+			Content:          getStr(delta, "content"),
+			ReasoningContent: getStr(delta, "reasoning_content"),
+			ToolCall:         getStr(delta, "tool_call"),
 		}
 
-		streamChunk := domain.ChatResponse{
+		chunk := domain.ChatResponse{
 			ID:      utils.GenerateChatCompletionID(),
 			Object:  "chat.completion.chunk",
 			Created: time.Now().Unix(),
 			Model:   req.Model,
-			Choices: []domain.Choice{
-				{
-					Index: 0,
-					Delta: deltaResponse,
-				},
-			},
+			Choices: []domain.Choice{{Index: 0, Delta: deltaMsg}},
 		}
 
-		chunkJSON, _ := json.Marshal(streamChunk)
-		fmt.Fprintf(w, "data: %s\n\n", chunkJSON)
+		data, _ := json.Marshal(chunk)
+		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 	}
 
-	// Emit the final 'stop' chunk to signal standard completion to the client.
-	finishChunk := domain.ChatResponse{
+	// stop chunk
+	stopChunk := domain.ChatResponse{
 		ID:      utils.GenerateChatCompletionID(),
 		Object:  "chat.completion.chunk",
 		Created: time.Now().Unix(),
 		Model:   req.Model,
-		Choices: []domain.Choice{
-			{
-				Index:        0,
-				Delta:        &domain.ResponseMessage{Role: "assistant"},
-				FinishReason: stringPtr("stop"),
-			},
-		},
+		Choices: []domain.Choice{{
+			Index:        0,
+			Delta:        &domain.ResponseMessage{Role: "assistant"},
+			FinishReason: strPtr("stop"),
+		}},
 	}
-	finishJSON, _ := json.Marshal(finishChunk)
-	fmt.Fprintf(w, "data: %s\n\n", finishJSON)
+	data, _ := json.Marshal(stopChunk)
+	fmt.Fprintf(w, "data: %s\n\n", data)
 	flusher.Flush()
 
-	// Append usage statistics as a final event if the client opted in.
-	// This mirrors the behavior of newer OpenAI API versions.
+	// usage chunk
 	if includeUsage {
-		completionText := strings.Join(contentParts, "")
-		completionTokens := tokenizer.Count(completionText)
+		text := strings.Join(contentParts, "")
+		completionTokens := tokenizer.Count(text)
 
 		usageChunk := domain.ChatResponse{
 			ID:      utils.GenerateChatCompletionID(),
@@ -173,30 +146,27 @@ func handleStreamingResponse(w http.ResponseWriter, resp *http.Response, req *do
 				TotalTokens:      promptTokens + completionTokens,
 			},
 		}
-		usageJSON, _ := json.Marshal(usageChunk)
-		fmt.Fprintf(w, "data: %s\n\n", usageJSON)
+		data, _ := json.Marshal(usageChunk)
+		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 	}
 
-	// Terminate the SSE stream with the standard [DONE] marker.
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
 }
 
-func handleNonStreamingResponse(w http.ResponseWriter, resp *http.Response, req *domain.ChatRequest, cfg *config.Config, tokenizer utils.Tokener) {
+func handleNonStream(w http.ResponseWriter, resp *http.Response, req *domain.ChatRequest, cfg *config.Config, tokenizer utils.Tokener) {
 	var contentParts []string
 	var reasoningParts []string
 
-	// Consume the entire stream to aggregate the full response object.
-	// Even for non-streaming requests, we parse the upstream SSE to construct the final JSON.
 	for zaiResp := range zlm.ParseSSEStream(resp) {
 		delta := zlm.FormatResponse(zaiResp, cfg)
 		if delta != nil {
-			if content, ok := delta["content"].(string); ok {
-				contentParts = append(contentParts, content)
+			if c, ok := delta["content"].(string); ok {
+				contentParts = append(contentParts, c)
 			}
-			if reasoningContent, ok := delta["reasoning_content"].(string); ok {
-				reasoningParts = append(reasoningParts, reasoningContent)
+			if r, ok := delta["reasoning_content"].(string); ok {
+				reasoningParts = append(reasoningParts, r)
 			}
 		}
 
@@ -205,39 +175,32 @@ func handleNonStreamingResponse(w http.ResponseWriter, resp *http.Response, req 
 		}
 	}
 
-	// Reconstruct the final message from aggregated parts.
-	finalMessage := &domain.ResponseMessage{
-		Role: "assistant",
-	}
+	msg := &domain.ResponseMessage{Role: "assistant"}
 
 	completionText := ""
 	if len(reasoningParts) > 0 {
 		reasoning := strings.Join(reasoningParts, "")
-		finalMessage.ReasoningContent = reasoning
+		msg.ReasoningContent = reasoning
 		completionText += reasoning
 	}
 	if len(contentParts) > 0 {
 		content := strings.Join(contentParts, "")
-		finalMessage.Content = content
+		msg.Content = content
 		completionText += content
 	}
 
-	// Build response
 	response := domain.ChatResponse{
 		ID:      utils.GenerateChatCompletionID(),
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
 		Model:   req.Model,
-		Choices: []domain.Choice{
-			{
-				Index:        0,
-				Message:      finalMessage,
-				FinishReason: stringPtr("stop"),
-			},
-		},
+		Choices: []domain.Choice{{
+			Index:        0,
+			Message:      msg,
+			FinishReason: strPtr("stop"),
+		}},
 	}
 
-	// Add usage
 	promptTokens := zlm.CountTokens(req.Messages, tokenizer)
 	completionTokens := tokenizer.Count(completionText)
 	response.Usage = &domain.Usage{
@@ -250,7 +213,7 @@ func handleNonStreamingResponse(w http.ResponseWriter, resp *http.Response, req 
 	json.NewEncoder(w).Encode(response)
 }
 
-func getStringFromMap(m map[string]interface{}, key string) string {
+func getStr(m map[string]interface{}, key string) string {
 	if v, ok := m[key]; ok {
 		if s, ok := v.(string); ok {
 			return s
@@ -259,12 +222,71 @@ func getStringFromMap(m map[string]interface{}, key string) string {
 	return ""
 }
 
-func writeError(w http.ResponseWriter, code int, message string) {
+func writeError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(domain.NewUpstreamError(code, message))
+	json.NewEncoder(w).Encode(domain.NewUpstreamError(code, msg))
 }
 
-func stringPtr(s string) *string {
+func strPtr(s string) *string {
 	return &s
+}
+
+func ListModels(cfg *config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		modelsURL := fmt.Sprintf("%s//%s/api/models", cfg.Upstream.Protocol, cfg.Upstream.Host)
+
+		req, err := http.NewRequest("GET", modelsURL, nil)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create request")
+			return
+		}
+
+		for k, v := range cfg.GetUpstreamHeaders() {
+			req.Header.Set(k, v)
+		}
+		req.Header.Set("Authorization", "Bearer "+cfg.Upstream.Token)
+
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			logger.Error().Err(err).Msg("models request failed")
+			writeError(w, http.StatusBadGateway, "upstream unavailable")
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			writeError(w, resp.StatusCode, "upstream error")
+			return
+		}
+
+		var upstream struct {
+			Data []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&upstream); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to parse models")
+			return
+		}
+
+		// format as OpenAI response
+		models := make([]map[string]interface{}, 0, len(upstream.Data))
+		for _, m := range upstream.Data {
+			models = append(models, map[string]interface{}{
+				"id":       m.ID,
+				"object":   "model",
+				"created":  time.Now().Unix(),
+				"owned_by": "zhipu",
+			})
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"object": "list",
+			"data":   models,
+		})
+	}
 }

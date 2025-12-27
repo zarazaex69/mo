@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -18,151 +19,139 @@ import (
 	"github.com/zarazaex69/mo/internal/service/auth"
 )
 
-// Client handles communication with Z.AI API
 type Client struct {
-	cfg          *config.Config
-	authService  auth.AuthServicer
-	signatureGen crypto.SignatureGenerator
+	cfg    *config.Config
+	auth   auth.AuthServicer
+	sigGen crypto.SignatureGenerator
 }
 
-// NewClient creates a new Z.AI API client
 func NewClient(cfg *config.Config, authSvc auth.AuthServicer, sigGen crypto.SignatureGenerator) *Client {
 	return &Client{
-		cfg:          cfg,
-		authService:  authSvc,
-		signatureGen: sigGen,
+		cfg:    cfg,
+		auth:   authSvc,
+		sigGen: sigGen,
 	}
 }
 
-// SendChatRequest initiates a synchronous HTTP request to the upstream AI provider to obtain chat completions.
-// It acts as a facade, handling authentication, request signing, and protocol adaptation to ensure
-// seamless integration with the Z.AI API while abstracting these complexities from the caller.
 func (c *Client) SendChatRequest(req *domain.ChatRequest, chatID string) (*http.Response, error) {
-	timestamp := time.Now().UnixMilli()
-	requestID := utils.GenerateRequestID()
+	ts := time.Now().UnixMilli()
+	reqID := utils.GenerateRequestID()
 
-	// Retrieve authenticated user credentials to ensure upstream requests are authorized and traceable.
-	// This step is mandatory as anonymous access is strictly prohibited in this configuration.
-	user, err := c.authService.GetUser(c.cfg)
+	user, err := c.auth.GetUser(c.cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get user info: %w", err)
+		return nil, fmt.Errorf("get user: %w", err)
 	}
 
-	// Construct necessary query parameters to satisfy the upstream API versioning and tracking requirements.
-	// Accurate timestamps and request IDs are critical for replay attack prevention and debugging.
 	params := url.Values{}
-	params.Set("timestamp", fmt.Sprintf("%d", timestamp))
-	params.Set("requestId", requestID)
+	params.Set("timestamp", fmt.Sprintf("%d", ts))
+	params.Set("requestId", reqID)
 	params.Set("version", "0.0.1")
 	params.Set("platform", "web")
 	params.Set("token", user.Token)
 
-	// Populate HTTP headers to comply with the upstream contract, including content negotiation
-	// and origin falsification (if necessary for proxying).
 	headers := c.cfg.GetUpstreamHeaders()
 	headers["Authorization"] = "Bearer " + user.Token
 	headers["Content-Type"] = "application/json"
 	headers["Referer"] = fmt.Sprintf("%s//%s/c/%s", c.cfg.Upstream.Protocol, c.cfg.Upstream.Host, chatID)
 
-	// Transform the internal domain request model into the specific payload format required by Z.AI.
-	// This ensures that any discrepancies between our internal API and the upstream API are bridged here.
-	requestBody, err := FormatRequest(req, c.cfg)
+	body, err := FormatRequest(req, c.cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to format request: %w", err)
+		return nil, fmt.Errorf("format request: %w", err)
 	}
 
-	// Append metadata fields that are expected by the upstream backend but not present in the standard OpenAI schema.
-	requestBody["chat_id"] = chatID
-	requestBody["id"] = utils.GenerateRequestID()
+	body["chat_id"] = chatID
+	body["id"] = utils.GenerateRequestID()
 
-	// Inject cryptographic signatures for legitimate user authentication.
-	// This verifies the integrity of the request and binds it to a specific user context.
 	params.Set("user_id", user.ID)
 
-	// Extract the most recent user prompt to serve as the message payload for signature generation.
-	lastUserMsg := extractLastUserMessage(req.Messages)
+	lastMsg := extractLastUserMessage(req.Messages)
 
-	// Generate and attach the HMAC signature to verify request authenticity and prevent tampering.
+	// sign the request
 	sigParams := map[string]string{
-		"requestId": requestID,
-		"timestamp": fmt.Sprintf("%d", timestamp),
+		"requestId": reqID,
+		"timestamp": fmt.Sprintf("%d", ts),
 		"user_id":   user.ID,
 	}
-	sigResult, err := c.signatureGen.GenerateSignature(sigParams, lastUserMsg)
+	sig, err := c.sigGen.GenerateSignature(sigParams, lastMsg)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to generate signature, continuing without it")
+		logger.Warn().Err(err).Msg("signature failed, continuing without it")
 	} else {
-		headers["x-signature"] = sigResult.Signature
-		params.Set("signature_timestamp", fmt.Sprintf("%d", sigResult.Timestamp))
-		requestBody["signature_prompt"] = lastUserMsg
+		headers["x-signature"] = sig.Signature
+		params.Set("signature_timestamp", fmt.Sprintf("%d", sig.Timestamp))
+		body["signature_prompt"] = lastMsg
 	}
 
-	// Compose the full upstream URL.
 	apiURL := fmt.Sprintf("%s//%s/api/v2/chat/completions?%s",
 		c.cfg.Upstream.Protocol, c.cfg.Upstream.Host, params.Encode())
 
-	// Serialize the request body.
-	bodyBytes, err := json.Marshal(requestBody)
+	bodyBytes, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, fmt.Errorf("marshal body: %w", err)
 	}
 
 	logger.Debug().
 		Str("url", apiURL).
 		Str("chat_id", chatID).
 		Str("model", req.Model).
-		Msg("Sending chat request to Z.AI")
+		RawJSON("body", bodyBytes).
+		Msg("sending request")
 
-	// Create the HTTP request object.
 	httpReq, err := http.NewRequest("POST", apiURL, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+		return nil, fmt.Errorf("create request: %w", err)
 	}
 
-	// Apply the prepared headers to the request.
 	for k, v := range headers {
 		httpReq.Header.Set(k, v)
 	}
 
-	// Execute the request using a zero-timeout client to support potential long-lived streaming responses.
-	// A timeout here would prematurely cut off the stream from the AI provider.
+	// no timeout for streaming
 	client := httpclient.New(0)
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
+		return nil, fmt.Errorf("send request: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		// read error body for debugging
+		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, domain.NewUpstreamError(resp.StatusCode, "Z.AI API error")
+
+		logger.Error().
+			Int("status", resp.StatusCode).
+			Str("body", string(body)).
+			Msg("upstream returned error")
+
+		return nil, domain.NewUpstreamError(resp.StatusCode, "upstream error")
 	}
 
 	return resp, nil
 }
 
-// extractLastUserMessage extracts the last user message content for signature
-func extractLastUserMessage(messages []domain.Message) string {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "user" {
-			// Handle string content
-			if contentStr, ok := messages[i].Content.(string); ok {
-				return contentStr
-			}
+func extractLastUserMessage(msgs []domain.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != "user" {
+			continue
+		}
 
-			// Handle array content (multimodal)
-			if contentArr, ok := messages[i].Content.([]interface{}); ok {
-				var texts []string
-				for _, item := range contentArr {
-					if itemMap, ok := item.(map[string]interface{}); ok {
-						if itemMap["type"] == "text" {
-							if text, ok := itemMap["text"].(string); ok {
-								texts = append(texts, text)
-							}
+		// string content
+		if s, ok := msgs[i].Content.(string); ok {
+			return s
+		}
+
+		// multimodal array
+		if arr, ok := msgs[i].Content.([]interface{}); ok {
+			var texts []string
+			for _, item := range arr {
+				if m, ok := item.(map[string]interface{}); ok {
+					if m["type"] == "text" {
+						if t, ok := m["text"].(string); ok {
+							texts = append(texts, t)
 						}
 					}
 				}
-				return strings.Join(texts, " ")
 			}
+			return strings.Join(texts, " ")
 		}
 	}
 	return ""
