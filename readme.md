@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/logo.png" alt="Conv3n" width="200"/>
+  <img src="assets/logo.png" alt="Mo" width="200"/>
 </div>
 
 <div align="center">
@@ -17,10 +17,10 @@ Mo is a reverse ingenereed neuro server
 
 ```bash
 # build the mo 
-go build ./cmd/mo
+make build
 
 # start the mo
-./mo
+./bin/mo
 ```
 
 <div align="center">
