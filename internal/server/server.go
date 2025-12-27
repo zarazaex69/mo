@@ -15,22 +15,22 @@ import (
 type Server struct {
 	cfg       *config.Config
 	router    *chi.Mux
-	aiClient  *zlm.Client
+	client    *zlm.Client
 	tokenizer utils.Tokener
 }
 
-func New(cfg *config.Config, aiClient *zlm.Client, tokenizer utils.Tokener) *Server {
+func New(cfg *config.Config, client *zlm.Client, tokenizer utils.Tokener) *Server {
 	s := &Server{
 		cfg:       cfg,
 		router:    chi.NewRouter(),
-		aiClient:  aiClient,
+		client:    client,
 		tokenizer: tokenizer,
 	}
-	s.setupRoutes()
+	s.routes()
 	return s
 }
 
-func (s *Server) setupRoutes() {
+func (s *Server) routes() {
 	s.router.Use(middleware.Logger)
 	s.router.Use(middleware.Recoverer)
 	s.router.Use(middleware.RealIP)
@@ -42,7 +42,7 @@ func (s *Server) setupRoutes() {
 	})
 
 	s.router.Get("/v1/models", ListModels(s.cfg))
-	s.router.Post("/v1/chat/completions", ChatCompletions(s.cfg, s.aiClient, s.tokenizer))
+	s.router.Post("/v1/chat/completions", ChatCompletions(s.cfg, s.client, s.tokenizer))
 }
 
 func (s *Server) Start() error {

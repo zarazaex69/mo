@@ -15,20 +15,20 @@ import (
 	"github.com/zarazaex69/mo/internal/provider/zlm"
 )
 
-type AIClienter interface {
+type AIClient interface {
 	SendChatRequest(req *domain.ChatRequest, chatID string) (*http.Response, error)
 }
 
-func ChatCompletions(cfg *config.Config, aiClient AIClienter, tokenizer utils.Tokener) http.HandlerFunc {
+func ChatCompletions(cfg *config.Config, client AIClient, tokenizer utils.Tokener) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req domain.ChatRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "Invalid JSON request")
+			writeErr(w, http.StatusBadRequest, "invalid json")
 			return
 		}
 
 		if err := validator.Validate(&req); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
@@ -44,25 +44,25 @@ func ChatCompletions(cfg *config.Config, aiClient AIClienter, tokenizer utils.To
 			Int("messages", len(req.Messages)).
 			Msg("chat request")
 
-		resp, err := aiClient.SendChatRequest(&req, chatID)
+		resp, err := client.SendChatRequest(&req, chatID)
 		if err != nil {
 			logger.Error().Err(err).Msg("request failed")
-			writeError(w, http.StatusInternalServerError, "Failed to process request")
+			writeErr(w, http.StatusInternalServerError, "failed to process request")
 			return
 		}
 
 		if req.Stream {
-			handleStream(w, resp, &req, cfg, tokenizer)
+			streamResponse(w, resp, &req, cfg, tokenizer)
 		} else {
-			handleNonStream(w, resp, &req, cfg, tokenizer)
+			nonStreamResponse(w, resp, &req, cfg, tokenizer)
 		}
 	}
 }
 
-func handleStream(w http.ResponseWriter, resp *http.Response, req *domain.ChatRequest, cfg *config.Config, tokenizer utils.Tokener) {
+func streamResponse(w http.ResponseWriter, resp *http.Response, req *domain.ChatRequest, cfg *config.Config, tokenizer utils.Tokener) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		writeError(w, http.StatusInternalServerError, "Streaming not supported")
+		writeErr(w, http.StatusInternalServerError, "streaming not supported")
 		return
 	}
 
@@ -70,7 +70,7 @@ func handleStream(w http.ResponseWriter, resp *http.Response, req *domain.ChatRe
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	var contentParts []string
+	var parts []string
 	includeUsage := req.StreamOpts != nil && req.StreamOpts.IncludeUsage
 
 	promptTokens := 0
@@ -86,14 +86,14 @@ func handleStream(w http.ResponseWriter, resp *http.Response, req *domain.ChatRe
 
 		if includeUsage {
 			if c, ok := delta["content"].(string); ok {
-				contentParts = append(contentParts, c)
+				parts = append(parts, c)
 			}
 			if r, ok := delta["reasoning_content"].(string); ok {
-				contentParts = append(contentParts, r)
+				parts = append(parts, r)
 			}
 		}
 
-		deltaMsg := &domain.ResponseMessage{
+		msg := &domain.ResponseMessage{
 			Role:             getStr(delta, "role"),
 			Content:          getStr(delta, "content"),
 			ReasoningContent: getStr(delta, "reasoning_content"),
@@ -105,7 +105,7 @@ func handleStream(w http.ResponseWriter, resp *http.Response, req *domain.ChatRe
 			Object:  "chat.completion.chunk",
 			Created: time.Now().Unix(),
 			Model:   req.Model,
-			Choices: []domain.Choice{{Index: 0, Delta: deltaMsg}},
+			Choices: []domain.Choice{{Index: 0, Delta: msg}},
 		}
 
 		data, _ := json.Marshal(chunk)
@@ -114,7 +114,7 @@ func handleStream(w http.ResponseWriter, resp *http.Response, req *domain.ChatRe
 	}
 
 	// stop chunk
-	stopChunk := domain.ChatResponse{
+	stop := domain.ChatResponse{
 		ID:      utils.GenerateChatCompletionID(),
 		Object:  "chat.completion.chunk",
 		Created: time.Now().Unix(),
@@ -125,16 +125,16 @@ func handleStream(w http.ResponseWriter, resp *http.Response, req *domain.ChatRe
 			FinishReason: strPtr("stop"),
 		}},
 	}
-	data, _ := json.Marshal(stopChunk)
+	data, _ := json.Marshal(stop)
 	fmt.Fprintf(w, "data: %s\n\n", data)
 	flusher.Flush()
 
 	// usage chunk
 	if includeUsage {
-		text := strings.Join(contentParts, "")
+		text := strings.Join(parts, "")
 		completionTokens := tokenizer.Count(text)
 
-		usageChunk := domain.ChatResponse{
+		usage := domain.ChatResponse{
 			ID:      utils.GenerateChatCompletionID(),
 			Object:  "chat.completion.chunk",
 			Created: time.Now().Unix(),
@@ -146,7 +146,7 @@ func handleStream(w http.ResponseWriter, resp *http.Response, req *domain.ChatRe
 				TotalTokens:      promptTokens + completionTokens,
 			},
 		}
-		data, _ := json.Marshal(usageChunk)
+		data, _ := json.Marshal(usage)
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 	}
@@ -155,19 +155,21 @@ func handleStream(w http.ResponseWriter, resp *http.Response, req *domain.ChatRe
 	flusher.Flush()
 }
 
-func handleNonStream(w http.ResponseWriter, resp *http.Response, req *domain.ChatRequest, cfg *config.Config, tokenizer utils.Tokener) {
+func nonStreamResponse(w http.ResponseWriter, resp *http.Response, req *domain.ChatRequest, cfg *config.Config, tokenizer utils.Tokener) {
 	var contentParts []string
 	var reasoningParts []string
 
 	for zaiResp := range zlm.ParseSSEStream(resp) {
 		delta := zlm.FormatResponse(zaiResp, cfg)
-		if delta != nil {
-			if c, ok := delta["content"].(string); ok {
-				contentParts = append(contentParts, c)
-			}
-			if r, ok := delta["reasoning_content"].(string); ok {
-				reasoningParts = append(reasoningParts, r)
-			}
+		if delta == nil {
+			continue
+		}
+
+		if c, ok := delta["content"].(string); ok {
+			contentParts = append(contentParts, c)
+		}
+		if r, ok := delta["reasoning_content"].(string); ok {
+			reasoningParts = append(reasoningParts, r)
 		}
 
 		if zaiResp.Data != nil && zaiResp.Data.Done {
@@ -213,32 +215,13 @@ func handleNonStream(w http.ResponseWriter, resp *http.Response, req *domain.Cha
 	json.NewEncoder(w).Encode(response)
 }
 
-func getStr(m map[string]interface{}, key string) string {
-	if v, ok := m[key]; ok {
-		if s, ok := v.(string); ok {
-			return s
-		}
-	}
-	return ""
-}
-
-func writeError(w http.ResponseWriter, code int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(domain.NewUpstreamError(code, msg))
-}
-
-func strPtr(s string) *string {
-	return &s
-}
-
 func ListModels(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		modelsURL := fmt.Sprintf("%s//%s/api/models", cfg.Upstream.Protocol, cfg.Upstream.Host)
+		url := fmt.Sprintf("%s//%s/api/models", cfg.Upstream.Protocol, cfg.Upstream.Host)
 
-		req, err := http.NewRequest("GET", modelsURL, nil)
+		req, err := http.NewRequest("GET", url, nil)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to create request")
+			writeErr(w, http.StatusInternalServerError, "failed to create request")
 			return
 		}
 
@@ -251,13 +234,13 @@ func ListModels(cfg *config.Config) http.HandlerFunc {
 		resp, err := client.Do(req)
 		if err != nil {
 			logger.Error().Err(err).Msg("models request failed")
-			writeError(w, http.StatusBadGateway, "upstream unavailable")
+			writeErr(w, http.StatusBadGateway, "upstream unavailable")
 			return
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			writeError(w, resp.StatusCode, "upstream error")
+			writeErr(w, resp.StatusCode, "upstream error")
 			return
 		}
 
@@ -268,11 +251,10 @@ func ListModels(cfg *config.Config) http.HandlerFunc {
 			} `json:"data"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&upstream); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to parse models")
+			writeErr(w, http.StatusInternalServerError, "failed to parse models")
 			return
 		}
 
-		// format as OpenAI response
 		models := make([]map[string]interface{}, 0, len(upstream.Data))
 		for _, m := range upstream.Data {
 			models = append(models, map[string]interface{}{
@@ -289,4 +271,23 @@ func ListModels(cfg *config.Config) http.HandlerFunc {
 			"data":   models,
 		})
 	}
+}
+
+func getStr(m map[string]interface{}, key string) string {
+	if v, ok := m[key]; ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+func writeErr(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(domain.NewUpstreamError(code, msg))
+}
+
+func strPtr(s string) *string {
+	return &s
 }

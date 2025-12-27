@@ -15,7 +15,6 @@ import (
 func main() {
 	cfg, err := config.Load("configs/config.yaml")
 	if err != nil {
-		// config failed, show helpful message and exit
 		println("config error:", err.Error())
 		println("hint: set ZAI_TOKEN env variable or check configs/config.yaml")
 		os.Exit(1)
@@ -27,8 +26,8 @@ func main() {
 	sigGen := crypto.NewSignatureGenerator()
 	tokenizer := utils.NewTokenizer()
 
-	zlmClient := zlm.NewClient(cfg, authSvc, sigGen)
-	srv := server.New(cfg, zlmClient, tokenizer)
+	client := zlm.NewClient(cfg, authSvc, sigGen)
+	srv := server.New(cfg, client, tokenizer)
 
 	if err := srv.Start(); err != nil {
 		logger.Fatal().Err(err).Msg("server failed")

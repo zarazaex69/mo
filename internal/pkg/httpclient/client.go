@@ -6,15 +6,15 @@ import (
 )
 
 type Client struct {
-	client *http.Client
+	http *http.Client
 }
 
 func New(timeout time.Duration) *Client {
 	return &Client{
-		client: &http.Client{Timeout: timeout},
+		http: &http.Client{Timeout: timeout},
 	}
 }
 
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
-	return c.client.Do(req)
+	return c.http.Do(req)
 }

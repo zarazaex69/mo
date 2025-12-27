@@ -39,7 +39,6 @@ func (s *Service) GetUser(cfg *config.Config) (*domain.User, error) {
 		return nil, fmt.Errorf("token required")
 	}
 
-	// check cache
 	s.mu.RLock()
 	cached, ok := s.cache[token]
 	s.mu.RUnlock()
@@ -49,7 +48,6 @@ func (s *Service) GetUser(cfg *config.Config) (*domain.User, error) {
 		return cached.user, nil
 	}
 
-	// fetch from api
 	url := fmt.Sprintf("%s//%s/api/v1/auths/", cfg.Upstream.Protocol, cfg.Upstream.Host)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -86,7 +84,6 @@ func (s *Service) GetUser(cfg *config.Config) (*domain.User, error) {
 		Token: token,
 	}
 
-	// cache it
 	if userID != "" {
 		s.mu.Lock()
 		s.cache[token] = &cachedUser{user: user, cachedAt: time.Now()}

@@ -10,7 +10,7 @@ import (
 	"strconv"
 )
 
-const defaultSecretKey = "key-@@@@)))()((9))-xxxx&&&%%%%%"
+const defaultSecret = "key-@@@@)))()((9))-xxxx&&&%%%%%"
 
 type SignatureResult struct {
 	Signature string
@@ -21,13 +21,13 @@ type SignatureGenerator interface {
 	GenerateSignature(params map[string]string, lastUserMsg string) (*SignatureResult, error)
 }
 
-type signatureGen struct{}
+type sigGen struct{}
 
 func NewSignatureGenerator() SignatureGenerator {
-	return &signatureGen{}
+	return &sigGen{}
 }
 
-func (s *signatureGen) GenerateSignature(params map[string]string, lastUserMsg string) (*SignatureResult, error) {
+func (s *sigGen) GenerateSignature(params map[string]string, lastUserMsg string) (*SignatureResult, error) {
 	reqID := params["requestId"]
 	tsStr := params["timestamp"]
 	userID := params["user_id"]
@@ -41,13 +41,10 @@ func (s *signatureGen) GenerateSignature(params map[string]string, lastUserMsg s
 		return nil, fmt.Errorf("invalid timestamp: %w", err)
 	}
 
-	// canonical string format
 	canonical := fmt.Sprintf("requestId,%s,timestamp,%d,user_id,%s", reqID, ts, userID)
 
-	// base64 encode the prompt
 	w := base64.StdEncoding.EncodeToString([]byte(lastUserMsg))
 
-	// string to sign: canonical|prompt|timestamp
 	c := fmt.Sprintf("%s|%s|%s", canonical, w, tsStr)
 
 	// 5 min window
@@ -56,17 +53,15 @@ func (s *signatureGen) GenerateSignature(params map[string]string, lastUserMsg s
 
 	secret := os.Getenv("ZAI_SECRET_KEY")
 	if secret == "" {
-		secret = defaultSecretKey
+		secret = defaultSecret
 	}
 
-	// step 1: hmac(secret, window)
 	h1, err := hmacSha256([]byte(secret), []byte(windowStr))
 	if err != nil {
 		return nil, fmt.Errorf("hmac step1: %w", err)
 	}
 	a := hex.EncodeToString(h1)
 
-	// step 2: hmac(a, c)
 	h2, err := hmacSha256([]byte(a), []byte(c))
 	if err != nil {
 		return nil, fmt.Errorf("hmac step2: %w", err)

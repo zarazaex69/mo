@@ -7,33 +7,33 @@ import (
 	"github.com/go-playground/validator/v10"
 )
 
-var validate *validator.Validate
+var v *validator.Validate
 
 func init() {
-	validate = validator.New()
+	v = validator.New()
 }
 
 func Validate(s interface{}) error {
-	err := validate.Struct(s)
+	err := v.Struct(s)
 	if err == nil {
 		return nil
 	}
 
 	if errs, ok := err.(validator.ValidationErrors); ok {
-		return formatErrors(errs)
+		return formatErrs(errs)
 	}
 	return err
 }
 
-func formatErrors(errs validator.ValidationErrors) error {
+func formatErrs(errs validator.ValidationErrors) error {
 	var msgs []string
 	for _, e := range errs {
-		msgs = append(msgs, formatFieldError(e))
+		msgs = append(msgs, formatField(e))
 	}
 	return fmt.Errorf("validation failed: %s", strings.Join(msgs, "; "))
 }
 
-func formatFieldError(e validator.FieldError) string {
+func formatField(e validator.FieldError) string {
 	field := e.Field()
 	tag := e.Tag()
 	param := e.Param()

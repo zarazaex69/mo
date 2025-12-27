@@ -51,28 +51,28 @@ var (
 	once sync.Once
 )
 
-func Load(configPath string) (*Config, error) {
+func Load(path string) (*Config, error) {
 	var err error
 	once.Do(func() {
-		cfg, err = loadConfig(configPath)
+		cfg, err = load(path)
 	})
 	return cfg, err
 }
 
 func Get() *Config {
 	if cfg == nil {
-		cfg, _ = loadConfig("")
+		cfg, _ = load("")
 	}
 	return cfg
 }
 
-func loadConfig(configPath string) (*Config, error) {
+func load(path string) (*Config, error) {
 	_ = godotenv.Load()
 
-	c := defaultConfig()
+	c := defaults()
 
-	if configPath != "" {
-		data, err := os.ReadFile(configPath)
+	if path != "" {
+		data, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("read config: %w", err)
 		}
@@ -81,7 +81,7 @@ func loadConfig(configPath string) (*Config, error) {
 		}
 	}
 
-	c.applyEnvOverrides()
+	c.applyEnv()
 
 	if err := c.validate(); err != nil {
 		return nil, err
@@ -90,7 +90,7 @@ func loadConfig(configPath string) (*Config, error) {
 	return c, nil
 }
 
-func defaultConfig() *Config {
+func defaults() *Config {
 	return &Config{
 		Server: ServerConfig{
 			Port:    8080,
@@ -119,26 +119,26 @@ func defaultConfig() *Config {
 	}
 }
 
-func (c *Config) applyEnvOverrides() {
-	if port := getEnvInt("PORT", 0); port != 0 {
+func (c *Config) applyEnv() {
+	if port := envInt("PORT", 0); port != 0 {
 		c.Server.Port = port
 	}
-	if host := getEnv("HOST", ""); host != "" {
+	if host := env("HOST", ""); host != "" {
 		c.Server.Host = host
 	}
-	if debug := getEnvBool("DEBUG", false); debug {
+	if debug := envBool("DEBUG", false); debug {
 		c.Server.Debug = debug
 	}
 
-	if token := getEnv("ZAI_TOKEN", ""); token != "" {
+	if token := env("ZAI_TOKEN", ""); token != "" {
 		c.Upstream.Token = strings.TrimSpace(token)
 	}
 
-	if model := getEnv("MODEL", ""); model != "" {
+	if model := env("MODEL", ""); model != "" {
 		c.Model.Default = model
 	}
-	if thinkMode := getEnv("THINK_MODE", ""); thinkMode != "" {
-		c.Model.ThinkMode = thinkMode
+	if mode := env("THINK_MODE", ""); mode != "" {
+		c.Model.ThinkMode = mode
 	}
 }
 
@@ -159,7 +159,6 @@ func (c *Config) validate() error {
 		return fmt.Errorf("invalid think_mode: %s", c.Model.ThinkMode)
 	}
 
-	// token is required in strict mode
 	if c.Upstream.Token == "" {
 		return fmt.Errorf("ZAI_TOKEN is required")
 	}
@@ -187,14 +186,14 @@ func (c *Config) GetUpstreamHeaders() map[string]string {
 	}
 }
 
-func getEnv(key, def string) string {
+func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
 	return def
 }
 
-func getEnvInt(key string, def int) int {
+func envInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {
 			return i
@@ -203,7 +202,7 @@ func getEnvInt(key string, def int) int {
 	return def
 }
 
-func getEnvBool(key string, def bool) bool {
+func envBool(key string, def bool) bool {
 	if v := os.Getenv(key); v != "" {
 		return strings.ToLower(v) == "true" || v == "1"
 	}

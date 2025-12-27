@@ -26,16 +26,15 @@ func FormatRequest(req *domain.ChatRequest, cfg *config.Config) (map[string]inte
 		model = cfg.Model.Default
 	}
 
-	var newMsgs []map[string]interface{}
+	var msgs []map[string]interface{}
 	chatID := utils.GenerateRequestID()
 
 	for _, msg := range req.Messages {
 		newMsg := map[string]interface{}{"role": msg.Role}
 
-		// string content
 		if s, ok := msg.Content.(string); ok {
 			newMsg["content"] = s
-			newMsgs = append(newMsgs, newMsg)
+			msgs = append(msgs, newMsg)
 			continue
 		}
 
@@ -97,16 +96,15 @@ func FormatRequest(req *domain.ChatRequest, cfg *config.Config) (map[string]inte
 			}
 
 			newMsg["content"] = content
-			newMsgs = append(newMsgs, newMsg)
+			msgs = append(msgs, newMsg)
 		}
 	}
 
 	result["model"] = model
-	result["messages"] = newMsgs
+	result["messages"] = msgs
 	result["stream"] = true
 	result["params"] = map[string]interface{}{}
 
-	// tools
 	if len(req.Tools) > 0 {
 		tools := make([]map[string]interface{}, len(req.Tools))
 		for i, t := range req.Tools {
@@ -136,7 +134,7 @@ func FormatRequest(req *domain.ChatRequest, cfg *config.Config) (map[string]inte
 
 func UploadImage(dataURL, chatID string, cfg *config.Config) (string, error) {
 	if !strings.HasPrefix(dataURL, "data:") {
-		return "", nil // not base64, assume url
+		return "", nil
 	}
 
 	parts := strings.SplitN(dataURL, ",", 2)
