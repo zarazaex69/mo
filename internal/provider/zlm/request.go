@@ -35,6 +35,25 @@ func FormatRequest(req *domain.ChatRequest, cfg *config.Config) (map[string]inte
 	for _, msg := range req.Messages {
 		newMsg := map[string]interface{}{"role": msg.Role}
 
+		// handle tool role - convert to format z.ai understands
+		if msg.Role == "tool" {
+			content := ""
+			if s, ok := msg.Content.(string); ok {
+				content = s
+			}
+			// z.ai expects tool results as user message with special format
+			newMsg["role"] = "user"
+			newMsg["content"] = fmt.Sprintf("[Tool Result]\n%s", content)
+			msgs = append(msgs, newMsg)
+			continue
+		}
+
+		// handle assistant with tool_calls
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			// skip assistant tool call messages, z.ai handles this differently
+			continue
+		}
+
 		if s, ok := msg.Content.(string); ok {
 			newMsg["content"] = s
 			msgs = append(msgs, newMsg)

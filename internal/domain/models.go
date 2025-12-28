@@ -24,8 +24,10 @@ type ToolFunction struct {
 }
 
 type Message struct {
-	Role    string      `json:"role" validate:"required,oneof=system user assistant"`
-	Content interface{} `json:"content" validate:"required"`
+	Role       string      `json:"role" validate:"required,oneof=system user assistant tool"`
+	Content    interface{} `json:"content"`
+	ToolCallID string      `json:"tool_call_id,omitempty"`
+	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
 }
 
 type StreamOptions struct {
@@ -53,7 +55,6 @@ type ResponseMessage struct {
 	Content          string     `json:"content,omitempty"`
 	ReasoningContent string     `json:"reasoning_content,omitempty"`
 	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
-	ToolCall         string     `json:"tool_call,omitempty"`
 }
 
 type ToolCall struct {
@@ -138,6 +139,7 @@ type ZaiResponseData struct {
 	Phase        string `json:"phase"`
 	DeltaContent string `json:"delta_content"`
 	EditContent  string `json:"edit_content"`
+	EditIndex    *int   `json:"edit_index"`
 	Done         bool   `json:"done"`
 }
 

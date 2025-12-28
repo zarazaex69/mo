@@ -71,6 +71,8 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, req *domain.Chat
 	w.Header().Set("Connection", "keep-alive")
 
 	var parts []string
+	var toolCallBuffer string
+	var pendingToolCall *domain.ToolCall
 	includeUsage := req.StreamOpts != nil && req.StreamOpts.IncludeUsage
 
 	promptTokens := 0
@@ -79,7 +81,7 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, req *domain.Chat
 	}
 
 	for zaiResp := range zlm.ParseSSEStream(resp) {
-		delta := zlm.FormatResponse(zaiResp, cfg)
+		delta := zlm.FormatResponse(zaiResp, cfg, false)
 		if delta == nil {
 			continue
 		}
@@ -93,11 +95,53 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, req *domain.Chat
 			}
 		}
 
+		// check for tool call in delta
+		if tc, ok := delta["tool_call"].(string); ok {
+			toolCallBuffer += tc
+
+			// try to parse complete tool call
+			if parsed := zlm.ParseToolCall(toolCallBuffer); parsed != nil {
+				pendingToolCall = parsed
+
+				// send tool call chunk
+				chunk := domain.ChatResponse{
+					ID:      utils.GenerateChatCompletionID(),
+					Object:  "chat.completion.chunk",
+					Created: time.Now().Unix(),
+					Model:   req.Model,
+					Choices: []domain.Choice{{
+						Index: 0,
+						Delta: &domain.ResponseMessage{
+							Role:      "assistant",
+							ToolCalls: []domain.ToolCall{*parsed},
+						},
+					}},
+				}
+				data, _ := json.Marshal(chunk)
+				fmt.Fprintf(w, "data: %s\n\n", data)
+				flusher.Flush()
+
+				toolCallBuffer = ""
+			}
+			continue
+		}
+
+		// regular content
+		content := getStr(delta, "content")
+		// strip any tool call blocks from content
+		if content != "" {
+			content = zlm.StripToolCallBlock(content)
+		}
+
 		msg := &domain.ResponseMessage{
 			Role:             getStr(delta, "role"),
-			Content:          getStr(delta, "content"),
+			Content:          content,
 			ReasoningContent: getStr(delta, "reasoning_content"),
-			ToolCall:         getStr(delta, "tool_call"),
+		}
+
+		// skip empty deltas
+		if msg.Content == "" && msg.ReasoningContent == "" && msg.Role == "" {
+			continue
 		}
 
 		chunk := domain.ChatResponse{
@@ -113,6 +157,12 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, req *domain.Chat
 		flusher.Flush()
 	}
 
+	// determine finish reason
+	finishReason := "stop"
+	if pendingToolCall != nil {
+		finishReason = "tool_calls"
+	}
+
 	// stop chunk
 	stop := domain.ChatResponse{
 		ID:      utils.GenerateChatCompletionID(),
@@ -122,7 +172,7 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, req *domain.Chat
 		Choices: []domain.Choice{{
 			Index:        0,
 			Delta:        &domain.ResponseMessage{Role: "assistant"},
-			FinishReason: strPtr("stop"),
+			FinishReason: strPtr(finishReason),
 		}},
 	}
 	data, _ := json.Marshal(stop)
@@ -158,18 +208,28 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, req *domain.Chat
 func nonStreamResponse(w http.ResponseWriter, resp *http.Response, req *domain.ChatRequest, cfg *config.Config, tokenizer utils.Tokener) {
 	var contentParts []string
 	var reasoningParts []string
+	var toolCallBuffer string
+	var toolCalls []domain.ToolCall
 
 	for zaiResp := range zlm.ParseSSEStream(resp) {
-		delta := zlm.FormatResponse(zaiResp, cfg)
+		delta := zlm.FormatResponse(zaiResp, cfg, true)
 		if delta == nil {
 			continue
 		}
 
 		if c, ok := delta["content"].(string); ok {
-			contentParts = append(contentParts, c)
+			c = zlm.StripToolCallBlock(c)
+			if c != "" {
+				// edit_content is just another chunk in non-stream mode
+				// don't replace, just append
+				contentParts = append(contentParts, c)
+			}
 		}
 		if r, ok := delta["reasoning_content"].(string); ok {
 			reasoningParts = append(reasoningParts, r)
+		}
+		if tc, ok := delta["tool_call"].(string); ok {
+			toolCallBuffer += tc
 		}
 
 		if zaiResp.Data != nil && zaiResp.Data.Done {
@@ -177,18 +237,35 @@ func nonStreamResponse(w http.ResponseWriter, resp *http.Response, req *domain.C
 		}
 	}
 
+	// parse accumulated tool calls
+	if toolCallBuffer != "" {
+		if parsed := zlm.ParseToolCall(toolCallBuffer); parsed != nil {
+			toolCalls = append(toolCalls, *parsed)
+		}
+	}
+
 	msg := &domain.ResponseMessage{Role: "assistant"}
 
 	completionText := ""
 	if len(reasoningParts) > 0 {
-		reasoning := strings.Join(reasoningParts, "")
+		reasoning := smartJoin(reasoningParts)
 		msg.ReasoningContent = reasoning
 		completionText += reasoning
 	}
 	if len(contentParts) > 0 {
-		content := strings.Join(contentParts, "")
+		content := smartJoin(contentParts)
 		msg.Content = content
 		completionText += content
+	}
+	if len(toolCalls) > 0 {
+		msg.ToolCalls = toolCalls
+		msg.Content = ""
+	}
+
+	// determine finish reason
+	finishReason := "stop"
+	if len(toolCalls) > 0 {
+		finishReason = "tool_calls"
 	}
 
 	response := domain.ChatResponse{
@@ -199,7 +276,7 @@ func nonStreamResponse(w http.ResponseWriter, resp *http.Response, req *domain.C
 		Choices: []domain.Choice{{
 			Index:        0,
 			Message:      msg,
-			FinishReason: strPtr("stop"),
+			FinishReason: strPtr(finishReason),
 		}},
 	}
 
@@ -213,6 +290,12 @@ func nonStreamResponse(w http.ResponseWriter, resp *http.Response, req *domain.C
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// smartJoin joins text parts directly
+// z.ai already includes proper spacing in chunks
+func smartJoin(parts []string) string {
+	return strings.Join(parts, "")
 }
 
 func ListModels(cfg *config.Config) http.HandlerFunc {

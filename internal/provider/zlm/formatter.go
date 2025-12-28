@@ -13,6 +13,9 @@ import (
 	"github.com/zarazaex69/mo/internal/pkg/utils"
 )
 
+// regex for parsing glm_block tool calls
+var glmBlockRegex = regexp.MustCompile(`<glm_block[^>]*tool_call_name="([^"]+)"[^>]*>(.+?)</glm_block>`)
+
 var phaseBak = "thinking"
 
 func ParseSSEStream(resp *http.Response) <-chan *domain.ZaiResponse {
@@ -20,31 +23,35 @@ func ParseSSEStream(resp *http.Response) <-chan *domain.ZaiResponse {
 
 	go func() {
 		defer close(ch)
+
+		// use larger buffer for utf-8 content
 		scanner := bufio.NewScanner(resp.Body)
+		buf := make([]byte, 0, 64*1024)
+		scanner.Buffer(buf, 1024*1024)
 
 		for scanner.Scan() {
-			line := scanner.Bytes()
+			line := scanner.Text()
 
-			if len(line) == 0 || !strings.HasPrefix(string(line), "data: ") {
+			if len(line) == 0 || !strings.HasPrefix(line, "data: ") {
 				continue
 			}
 
 			data := line[6:] // skip "data: "
 
-			if strings.TrimSpace(string(data)) == "[DONE]" {
+			if strings.TrimSpace(data) == "[DONE]" {
 				continue
 			}
 
 			var zaiResp domain.ZaiResponse
-			if err := json.Unmarshal(data, &zaiResp); err != nil {
+			if err := json.Unmarshal([]byte(data), &zaiResp); err != nil {
 				// try fallback for weird payloads
 				var raw struct {
 					Data string `json:"data"`
 				}
-				if json.Unmarshal(data, &raw) == nil && raw.Data != "" {
+				if json.Unmarshal([]byte(data), &raw) == nil && raw.Data != "" {
 					continue
 				}
-				logger.Debug().Err(err).Msg("parse sse failed")
+				logger.Debug().Err(err).Str("data", data).Msg("parse sse failed")
 				continue
 			}
 
@@ -59,7 +66,7 @@ func ParseSSEStream(resp *http.Response) <-chan *domain.ZaiResponse {
 	return ch
 }
 
-func FormatResponse(data *domain.ZaiResponse, cfg *config.Config) map[string]interface{} {
+func FormatResponse(data *domain.ZaiResponse, cfg *config.Config, skipEdit bool) map[string]interface{} {
 	if data == nil || data.Data == nil {
 		return nil
 	}
@@ -69,13 +76,28 @@ func FormatResponse(data *domain.ZaiResponse, cfg *config.Config) map[string]int
 		phase = "other"
 	}
 
+	// edit_content is a positional patch, not a simple delta
+	// in non-stream mode we skip it because delta_content has full text
+	isEdit := false
 	content := data.Data.DeltaContent
-	if content == "" {
+	if content == "" && data.Data.EditContent != "" {
+		if skipEdit {
+			return nil
+		}
 		content = data.Data.EditContent
+		isEdit = true
 	}
 	if content == "" {
 		return nil
 	}
+
+	// debug raw content from z.ai
+	logger.Debug().
+		Str("phase", phase).
+		Str("raw_content", content).
+		Bool("is_edit", isEdit).
+		Int("len", len(content)).
+		Msg("z.ai chunk")
 
 	// handle tool_call phase
 	if phase == "tool_call" {
@@ -135,6 +157,7 @@ func FormatResponse(data *domain.ZaiResponse, cfg *config.Config) map[string]int
 		return map[string]interface{}{
 			"role":              "assistant",
 			"reasoning_content": content,
+			"is_edit":           isEdit,
 		}
 	}
 
@@ -148,6 +171,7 @@ func FormatResponse(data *domain.ZaiResponse, cfg *config.Config) map[string]int
 		return map[string]interface{}{
 			"role":    "assistant",
 			"content": content,
+			"is_edit": isEdit,
 		}
 	}
 
@@ -182,4 +206,61 @@ func ExtractTextFromMessages(msgs []domain.Message) string {
 func CountTokens(msgs []domain.Message, tokenizer utils.Tokener) int {
 	text := ExtractTextFromMessages(msgs)
 	return tokenizer.Count(text)
+}
+
+// ParseToolCall extracts tool call from glm_block format
+// returns nil if no tool call found
+func ParseToolCall(content string) *domain.ToolCall {
+	matches := glmBlockRegex.FindStringSubmatch(content)
+	if len(matches) < 3 {
+		return nil
+	}
+
+	toolName := matches[1]
+	jsonData := matches[2]
+
+	// parse the mcp wrapper
+	var wrapper struct {
+		Type string `json:"type"`
+		Data struct {
+			Metadata struct {
+				ID        string `json:"id"`
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			} `json:"metadata"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal([]byte(jsonData), &wrapper); err != nil {
+		logger.Debug().Err(err).Msg("failed to parse tool call json")
+		return nil
+	}
+
+	callID := wrapper.Data.Metadata.ID
+	if callID == "" {
+		callID = "call_" + utils.GenerateID()[:10]
+	}
+
+	args := wrapper.Data.Metadata.Arguments
+	if args == "" {
+		args = "{}"
+	}
+
+	return &domain.ToolCall{
+		ID:   callID,
+		Type: "function",
+		Function: domain.FunctionCall{
+			Name:      toolName,
+			Arguments: args,
+		},
+	}
+}
+
+// StripToolCallBlock removes glm_block from content
+func StripToolCallBlock(content string) string {
+	if !strings.Contains(content, "glm_block") {
+		return content
+	}
+	// remove the glm_block and surrounding text that's part of tool call
+	return glmBlockRegex.ReplaceAllString(content, "")
 }
