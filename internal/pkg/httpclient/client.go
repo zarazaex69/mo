@@ -2,6 +2,8 @@ package httpclient
 
 import (
 	"net/http"
+	"net/url"
+	"os"
 	"time"
 )
 
@@ -10,8 +12,20 @@ type Client struct {
 }
 
 func New(timeout time.Duration) *Client {
+	transport := &http.Transport{}
+
+	// support ALL_PROXY env
+	if proxy := os.Getenv("ALL_PROXY"); proxy != "" {
+		if proxyURL, err := url.Parse(proxy); err == nil {
+			transport.Proxy = http.ProxyURL(proxyURL)
+		}
+	}
+
 	return &Client{
-		http: &http.Client{Timeout: timeout},
+		http: &http.Client{
+			Timeout:   timeout,
+			Transport: transport,
+		},
 	}
 }
 

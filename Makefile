@@ -1,13 +1,12 @@
 .PHONY: help build install clean test lint deps tidy
 
-# Build variables
+
 BINARY_NAME=mo
 VERSION?=0.1.0
 BUILD_DIR=bin
 INSTALL_DIR=/usr/local/bin
 
-# Go build flags
-# Strip debug information to reduce binary size for production usage
+
 LDFLAGS=-ldflags "-w -s -X main.Version=$(VERSION)"
 
 help: ## Show this help message
@@ -25,6 +24,11 @@ install: build ## Install the CLI to system
 	@echo "Installing $(BINARY_NAME) to $(INSTALL_DIR)..."
 	@sudo cp $(BUILD_DIR)/$(BINARY_NAME) $(INSTALL_DIR)/
 	@echo "Installation complete. Run '$(BINARY_NAME)' to get started."
+
+bench: ## Run API benchmarks
+	@echo "Building benchmark..."
+	@go build -o $(BUILD_DIR)/bench ./cmd/bench
+	@$(BUILD_DIR)/bench $(ARGS)
 
 clean: ## Clean build artifacts
 	@echo "Cleaning..."
