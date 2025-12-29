@@ -80,8 +80,9 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, req *domain.Chat
 		promptTokens = zlm.CountTokens(req.Messages, tokenizer)
 	}
 
+	fmtr := zlm.NewFormatter(cfg)
 	for zaiResp := range zlm.ParseSSEStream(resp) {
-		delta := zlm.FormatResponse(zaiResp, cfg, false)
+		delta := fmtr.Format(zaiResp)
 		if delta == nil {
 			continue
 		}
@@ -211,8 +212,9 @@ func nonStreamResponse(w http.ResponseWriter, resp *http.Response, req *domain.C
 	var toolCallBuffer string
 	var toolCalls []domain.ToolCall
 
+	fmtr := zlm.NewFormatter(cfg)
 	for zaiResp := range zlm.ParseSSEStream(resp) {
-		delta := zlm.FormatResponse(zaiResp, cfg, true)
+		delta := fmtr.Format(zaiResp)
 		if delta == nil {
 			continue
 		}

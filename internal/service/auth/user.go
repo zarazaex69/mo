@@ -27,10 +27,24 @@ type cachedUser struct {
 	cachedAt time.Time
 }
 
+var (
+	instance *Service
+	once     sync.Once
+)
+
+// GetService returns singleton auth service
+func GetService() *Service {
+	once.Do(func() {
+		instance = &Service{
+			cache: make(map[string]*cachedUser),
+		}
+	})
+	return instance
+}
+
+// NewService deprecated, use GetService
 func NewService() *Service {
-	return &Service{
-		cache: make(map[string]*cachedUser),
-	}
+	return GetService()
 }
 
 func (s *Service) GetUser(cfg *config.Config) (*domain.User, error) {
@@ -43,7 +57,6 @@ func (s *Service) GetUser(cfg *config.Config) (*domain.User, error) {
 	cached, ok := s.cache[token]
 	s.mu.RUnlock()
 
-	// 30 min ttl
 	if ok && time.Since(cached.cachedAt) < 30*time.Minute {
 		return cached.user, nil
 	}
@@ -71,7 +84,7 @@ func (s *Service) GetUser(cfg *config.Config) (*domain.User, error) {
 		return nil, fmt.Errorf("auth api returned %d", resp.StatusCode)
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
@@ -101,7 +114,7 @@ func (s *Service) ClearCache() {
 	logger.Info().Msg("cache cleared")
 }
 
-func getString(m map[string]interface{}, key string) string {
+func getString(m map[string]any, key string) string {
 	if v, ok := m[key]; ok {
 		if s, ok := v.(string); ok {
 			return s
