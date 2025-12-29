@@ -42,7 +42,7 @@ func GetService() *Service {
 	return instance
 }
 
-// NewService deprecated, use GetService
+// Deprecated: use GetService instead
 func NewService() *Service {
 	return GetService()
 }

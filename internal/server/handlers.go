@@ -250,12 +250,12 @@ func nonStreamResponse(w http.ResponseWriter, resp *http.Response, req *domain.C
 
 	completionText := ""
 	if len(reasoningParts) > 0 {
-		reasoning := smartJoin(reasoningParts)
+		reasoning := strings.Join(reasoningParts, "")
 		msg.ReasoningContent = reasoning
 		completionText += reasoning
 	}
 	if len(contentParts) > 0 {
-		content := smartJoin(contentParts)
+		content := strings.Join(contentParts, "")
 		msg.Content = content
 		completionText += content
 	}
@@ -292,12 +292,6 @@ func nonStreamResponse(w http.ResponseWriter, resp *http.Response, req *domain.C
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
-}
-
-// smartJoin joins text parts directly
-// z.ai already includes proper spacing in chunks
-func smartJoin(parts []string) string {
-	return strings.Join(parts, "")
 }
 
 func ListModels(cfg *config.Config) http.HandlerFunc {
@@ -340,9 +334,9 @@ func ListModels(cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		models := make([]map[string]interface{}, 0, len(upstream.Data))
+		models := make([]map[string]any, 0, len(upstream.Data))
 		for _, m := range upstream.Data {
-			models = append(models, map[string]interface{}{
+			models = append(models, map[string]any{
 				"id":       m.ID,
 				"object":   "model",
 				"created":  time.Now().Unix(),
@@ -351,14 +345,14 @@ func ListModels(cfg *config.Config) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		json.NewEncoder(w).Encode(map[string]any{
 			"object": "list",
 			"data":   models,
 		})
 	}
 }
 
-func getStr(m map[string]interface{}, key string) string {
+func getStr(m map[string]any, key string) string {
 	if v, ok := m[key]; ok {
 		if s, ok := v.(string); ok {
 			return s
