@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>mo - registration</title>
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #090A0D;
+  --text: #F2DEC4;
+  --surface: #191526;
+  --border: #A63232;
+  --accent: #A63232;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1.6;
+}
+
+main {
+  max-width: 500px;
+  padding: 40px;
+  text-align: center;
+}
+
+.lang-switch {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  display: flex;
+  gap: 8px;
+  font-size: 0.9rem;
+}
+
+.lang-switch a {
+  color: var(--text);
+  text-decoration: none;
+  opacity: 0.5;
+  cursor: pointer;
+}
+
+.lang-switch a:hover,
+.lang-switch a.active {
+  opacity: 1;
+  color: var(--accent);
+}
+
+h1 {
+  font-size: 1.5rem;
+  margin-bottom: 8px;
+}
+
+.muted {
+  opacity: 0.7;
+  font-size: 0.9rem;
+}
+
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--surface);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  margin: 30px auto;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.hint {
+  margin-top: 30px;
+  padding: 16px;
+  background: var(--surface);
+  border-left: 3px solid var(--border);
+  border-radius: 0 8px 8px 0;
+  text-align: left;
+  font-size: 0.9rem;
+}
+
+footer {
+  margin-top: 40px;
+  opacity: 0.5;
+  font-size: 0.8rem;
+}
+
+.snowflakes {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: -1;
+}
+
+.snowflake {
+  position: absolute;
+  top: -20px;
+  color: var(--text);
+  opacity: 0.3;
+  animation: fall linear infinite;
+}
+
+@keyframes fall {
+  to { transform: translateY(100vh) rotate(360deg); }
+}
+
+[data-lang]:not([data-lang="en"]) {
+  display: none;
+}
+</style>
+</head>
+<body>
+
+<div class="lang-switch">
+  <a onclick="setLang('en')">en</a>
+  <a onclick="setLang('ru')">ru</a>
+  <a onclick="setLang('be')">be</a>
+</div>
+
+<main>
+  <h1>mo</h1>
+  <p class="muted">by zarazaex</p>
+  
+  <div class="spinner"></div>
+  
+  <p data-lang="en">Preparing registration...</p>
+  <p data-lang="ru">Подготовка регистрации...</p>
+  <p data-lang="be">Падрыхтоўка рэгістрацыі...</p>
+  
+  <div class="hint">
+    <p data-lang="en">Switch to the first tab (Z.ai).<br>Please solve the captcha when it appears.</p>
+    <p data-lang="ru">Переключитесь на первую вкладку (Z.ai).<br>Пожалуйста, пройдите капчу когда она появится.</p>
+    <p data-lang="be">Пераключыцеся на першую ўкладку (Z.ai).<br>Калі ласка, прайдзіце капчу калі яна з'явіцца.</p>
+  </div>
+  
+  <footer>© 2025 zarazaex</footer>
+</main>
+
+<div class="snowflakes" id="snow"></div>
+
+<script>
+function setLang(lang) {
+  localStorage.setItem('lang', lang);
+  document.querySelectorAll('[data-lang]').forEach(el => el.style.display = 'none');
+  document.querySelectorAll('[data-lang="' + lang + '"]').forEach(el => el.style.display = '');
+  document.querySelectorAll('.lang-switch a').forEach(a => {
+    a.classList.toggle('active', a.textContent === lang);
+  });
+}
+
+function createSnowflakes() {
+  const container = document.getElementById('snow');
+  for (let i = 0; i < 15; i++) {
+    const flake = document.createElement('div');
+    flake.className = 'snowflake';
+    flake.textContent = '❄';
+    flake.style.left = Math.random() * 100 + '%';
+    flake.style.animationDuration = (8 + Math.random() * 7) + 's';
+    flake.style.animationDelay = Math.random() * 10 + 's';
+    flake.style.fontSize = (10 + Math.random() * 10) + 'px';
+    container.appendChild(flake);
+  }
+}
+
+setLang(localStorage.getItem('lang') || 'en');
+createSnowflakes();
+</script>
+
+</body>
+</html>

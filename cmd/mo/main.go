@@ -27,7 +27,12 @@ func main() {
 	tokenizer := utils.NewTokenizer()
 
 	client := zlm.NewClient(cfg, authSvc, sigGen)
-	srv := server.New(cfg, client, tokenizer)
+	srv, err := server.New(cfg, client, tokenizer)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to init server")
+		os.Exit(1)
+	}
+	defer srv.Close()
 
 	if err := srv.Start(); err != nil {
 		logger.Fatal().Err(err).Msg("server failed")

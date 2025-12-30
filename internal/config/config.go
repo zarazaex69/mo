@@ -159,10 +159,7 @@ func (c *Config) validate() error {
 		return fmt.Errorf("invalid think_mode: %s", c.Model.ThinkMode)
 	}
 
-	if c.Upstream.Token == "" {
-		return fmt.Errorf("ZAI_TOKEN is required")
-	}
-
+	// token is now optional - loaded from token store
 	return nil
 }
 

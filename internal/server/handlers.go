@@ -7,9 +7,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/zarazaex69/mo/internal/config"
 	"github.com/zarazaex69/mo/internal/domain"
+	"github.com/zarazaex69/mo/internal/pkg/browser"
+	"github.com/zarazaex69/mo/internal/pkg/crypto"
 	"github.com/zarazaex69/mo/internal/pkg/logger"
+	"github.com/zarazaex69/mo/internal/pkg/tempmail"
+	"github.com/zarazaex69/mo/internal/pkg/tokenstore"
 	"github.com/zarazaex69/mo/internal/pkg/utils"
 	"github.com/zarazaex69/mo/internal/pkg/validator"
 	"github.com/zarazaex69/mo/internal/provider/zlm"
@@ -369,4 +374,198 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 
 func strPtr(s string) *string {
 	return &s
+}
+
+// RegisterAccount handles Z.ai account registration via browser automation
+func RegisterAccount(store *tokenstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		logger.Info().Msg("starting account registration")
+
+		// create temp email
+		mail := tempmail.New()
+		email, err := mail.CreateEmail()
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to create temp email")
+			writeErr(w, http.StatusInternalServerError, "failed to create temp email")
+			return
+		}
+		logger.Info().Str("email", email.Address).Msg("created temp email")
+
+		// generate password
+		password := crypto.GeneratePassword(16)
+		name := strings.Split(email.Address, "@")[0]
+
+		creds := browser.Credentials{
+			Email:    email.Address,
+			Password: password,
+			Name:     name,
+		}
+
+		// start browser (visible for captcha)
+		br, err := browser.New(false)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to start browser")
+			writeErr(w, http.StatusInternalServerError, "failed to start browser")
+			return
+		}
+		defer br.Close()
+
+		// register (user solves captcha manually)
+		if _, err := br.RegisterZAI(creds); err != nil {
+			logger.Error().Err(err).Msg("registration failed")
+			writeErr(w, http.StatusInternalServerError, "registration failed: "+err.Error())
+			return
+		}
+
+		logger.Info().Msg("waiting for verification email")
+
+		// wait for verification email
+		msg, err := mail.WaitForMessage(email.Address, "z.ai", "verify", 2*time.Minute, 3*time.Second)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get verification email")
+			writeErr(w, http.StatusInternalServerError, "failed to get verification email")
+			return
+		}
+		if msg == nil {
+			logger.Error().Msg("verification email not received")
+			writeErr(w, http.StatusInternalServerError, "verification email not received")
+			return
+		}
+
+		logger.Info().Str("subject", msg.Subject).Msg("got verification email")
+
+		// extract verify link
+		link := tempmail.ExtractVerifyLink(msg.BodyText)
+		if link == "" {
+			link = tempmail.ExtractVerifyLink(msg.BodyHTML)
+		}
+		if link == "" {
+			logger.Error().Msg("verify link not found in email")
+			writeErr(w, http.StatusInternalServerError, "verify link not found")
+			return
+		}
+
+		logger.Info().Str("link", link).Msg("extracted verify link")
+
+		// verify email and get token
+		token, err := br.VerifyEmail(link, password)
+		if err != nil {
+			logger.Error().Err(err).Msg("email verification failed")
+			writeErr(w, http.StatusInternalServerError, "verification failed: "+err.Error())
+			return
+		}
+
+		// save to token store
+		saved, err := store.Add(email.Address, token)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to save token")
+			writeErr(w, http.StatusInternalServerError, "failed to save token")
+			return
+		}
+
+		logger.Info().Str("id", saved.ID).Msg("token saved to store")
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"token":   saved,
+		})
+	}
+}
+
+// ListTokens returns all tokens in the store
+func ListTokens(store *tokenstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tokens, err := store.List()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "failed to list tokens")
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"tokens": tokens,
+		})
+	}
+}
+
+// RemoveToken deletes a token by id
+func RemoveToken(store *tokenstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		if id == "" {
+			writeErr(w, http.StatusBadRequest, "missing token id")
+			return
+		}
+
+		if err := store.Remove(id); err != nil {
+			writeErr(w, http.StatusInternalServerError, "failed to remove token")
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+		})
+	}
+}
+
+// ActivateToken sets a token as active
+func ActivateToken(store *tokenstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		if id == "" {
+			writeErr(w, http.StatusBadRequest, "missing token id")
+			return
+		}
+
+		if err := store.SetActive(id); err != nil {
+			writeErr(w, http.StatusInternalServerError, "failed to activate token")
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+		})
+	}
+}
+
+// ValidateToken checks if a token is valid
+func ValidateToken(store *tokenstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		if id == "" {
+			writeErr(w, http.StatusBadRequest, "missing token id")
+			return
+		}
+
+		tokens, err := store.List()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "failed to list tokens")
+			return
+		}
+
+		var token *tokenstore.Token
+		for _, t := range tokens {
+			if t.ID == id {
+				token = t
+				break
+			}
+		}
+
+		if token == nil {
+			writeErr(w, http.StatusNotFound, "token not found")
+			return
+		}
+
+		valid := tokenstore.ValidateToken(token.Token)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":    token.ID,
+			"email": token.Email,
+			"valid": valid,
+		})
+	}
 }
