@@ -42,11 +42,7 @@ func GetService() *Service {
 	return instance
 }
 
-<<<<<<< HEAD
-// Deprecated: use GetService instead
-=======
 // NewService deprecated, use GetService
->>>>>>> f21722a (refactor(provider): restructure zlm formatter)
 func NewService() *Service {
 	return GetService()
 }
