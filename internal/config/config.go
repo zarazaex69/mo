@@ -71,6 +71,7 @@ func load(path string) (*Config, error) {
 
 	c := defaults()
 
+	// load from file if path provided and exists
 	if path != "" {
 		data, err := os.ReadFile(path)
 		if err != nil {

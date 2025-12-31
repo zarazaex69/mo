@@ -1,7 +1,9 @@
 package main
 
 import (
+	"flag"
 	"os"
+	"path/filepath"
 
 	"github.com/zarazaex69/mo/internal/config"
 	"github.com/zarazaex69/mo/internal/pkg/crypto"
@@ -13,11 +15,39 @@ import (
 )
 
 func main() {
-	cfg, err := config.Load("configs/config.yaml")
+	var configPath string
+	var port int
+
+	flag.StringVar(&configPath, "config", "", "path to config file")
+	flag.StringVar(&configPath, "c", "", "path to config file (shorthand)")
+	flag.IntVar(&port, "port", 0, "server port (overrides config)")
+	flag.IntVar(&port, "p", 0, "server port (shorthand)")
+	flag.Parse()
+
+	// try default paths if not specified
+	if configPath == "" {
+		candidates := []string{
+			"configs/config.yaml",
+			filepath.Join(os.Getenv("HOME"), ".config", "traw", "configs", "config.yaml"),
+		}
+		for _, p := range candidates {
+			if _, err := os.Stat(p); err == nil {
+				configPath = p
+				break
+			}
+		}
+	}
+
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		println("config error:", err.Error())
-		println("hint: set ZAI_TOKEN env variable or check configs/config.yaml")
+		println("hint: use --config flag or place config in ~/.config/traw/configs/config.yaml")
 		os.Exit(1)
+	}
+
+	// override port if specified
+	if port > 0 {
+		cfg.Server.Port = port
 	}
 
 	logger.Init(cfg.Server.Debug)
