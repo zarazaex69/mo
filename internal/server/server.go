@@ -3,6 +3,8 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -23,7 +25,14 @@ type Server struct {
 }
 
 func New(cfg *config.Config, client *zlm.Client, tokenizer utils.Tokener) (*Server, error) {
-	store, err := tokenstore.New("data/tokens")
+	// data path from env or default to ~/.config/traw/data
+	dataPath := os.Getenv("MO_DATA_PATH")
+	if dataPath == "" {
+		home, _ := os.UserHomeDir()
+		dataPath = filepath.Join(home, ".config", "traw", "data")
+	}
+
+	store, err := tokenstore.New(filepath.Join(dataPath, "tokens"))
 	if err != nil {
 		return nil, fmt.Errorf("init token store: %w", err)
 	}
