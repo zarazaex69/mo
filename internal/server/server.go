@@ -11,6 +11,7 @@ import (
 	"github.com/zarazaex69/mo/internal/pkg/tokenstore"
 	"github.com/zarazaex69/mo/internal/pkg/utils"
 	"github.com/zarazaex69/mo/internal/provider/zlm"
+	"github.com/zarazaex69/mo/internal/service/auth"
 )
 
 type Server struct {
@@ -26,6 +27,9 @@ func New(cfg *config.Config, client *zlm.Client, tokenizer utils.Tokener) (*Serv
 	if err != nil {
 		return nil, fmt.Errorf("init token store: %w", err)
 	}
+
+	// connect auth service to token store
+	auth.GetService().SetTokenStore(store)
 
 	s := &Server{
 		cfg:        cfg,

@@ -11,6 +11,7 @@ import (
 	"github.com/zarazaex69/mo/internal/domain"
 	"github.com/zarazaex69/mo/internal/pkg/httpclient"
 	"github.com/zarazaex69/mo/internal/pkg/logger"
+	"github.com/zarazaex69/mo/internal/pkg/tokenstore"
 )
 
 type AuthServicer interface {
@@ -18,8 +19,9 @@ type AuthServicer interface {
 }
 
 type Service struct {
-	cache map[string]*cachedUser
-	mu    sync.RWMutex
+	cache      map[string]*cachedUser
+	mu         sync.RWMutex
+	tokenStore *tokenstore.Store
 }
 
 type cachedUser struct {
@@ -47,8 +49,22 @@ func NewService() *Service {
 	return GetService()
 }
 
+// SetTokenStore sets the token store for fetching active token
+func (s *Service) SetTokenStore(store *tokenstore.Store) {
+	s.tokenStore = store
+}
+
 func (s *Service) GetUser(cfg *config.Config) (*domain.User, error) {
 	token := cfg.Upstream.Token
+
+	// if no token in config, try token store
+	if token == "" && s.tokenStore != nil {
+		active, err := s.tokenStore.GetActive()
+		if err == nil && active != nil {
+			token = active.Token
+		}
+	}
+
 	if token == "" {
 		return nil, fmt.Errorf("token required")
 	}
