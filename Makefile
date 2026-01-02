@@ -1,11 +1,9 @@
 .PHONY: help build install clean test lint deps tidy
 
-
 BINARY_NAME=mo
 VERSION?=0.1.0
 BUILD_DIR=bin
 INSTALL_DIR=/usr/local/bin
-
 
 LDFLAGS=-ldflags "-w -s -X main.Version=$(VERSION)"
 
