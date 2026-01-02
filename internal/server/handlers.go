@@ -300,7 +300,7 @@ func nonStreamResponse(w http.ResponseWriter, resp *http.Response, req *domain.C
 	json.NewEncoder(w).Encode(response)
 }
 
-func ListModels(cfg *config.Config) http.HandlerFunc {
+func ListModels(cfg *config.Config, store *tokenstore.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var models []map[string]any
 
@@ -310,34 +310,37 @@ func ListModels(cfg *config.Config) http.HandlerFunc {
 		}
 		models = append(models, qwenModels...)
 
-		url := fmt.Sprintf("%s//%s/api/models", cfg.Upstream.Protocol, cfg.Upstream.Host)
+		glmToken, _ := store.GetActiveByProvider("glm")
+		if glmToken != nil {
+			url := fmt.Sprintf("%s//%s/api/models", cfg.Upstream.Protocol, cfg.Upstream.Host)
 
-		req, err := http.NewRequest("GET", url, nil)
-		if err == nil {
-			for k, v := range cfg.GetUpstreamHeaders() {
-				req.Header.Set(k, v)
-			}
-			req.Header.Set("Authorization", "Bearer "+cfg.Upstream.Token)
-
-			client := &http.Client{Timeout: 10 * time.Second}
-			resp, err := client.Do(req)
-			if err == nil && resp.StatusCode == http.StatusOK {
-				defer resp.Body.Close()
-
-				var upstream struct {
-					Data []struct {
-						ID   string `json:"id"`
-						Name string `json:"name"`
-					} `json:"data"`
+			req, err := http.NewRequest("GET", url, nil)
+			if err == nil {
+				for k, v := range cfg.GetUpstreamHeaders() {
+					req.Header.Set(k, v)
 				}
-				if json.NewDecoder(resp.Body).Decode(&upstream) == nil {
-					for _, m := range upstream.Data {
-						models = append(models, map[string]any{
-							"id":       m.ID,
-							"object":   "model",
-							"created":  time.Now().Unix(),
-							"owned_by": "zhipu",
-						})
+				req.Header.Set("Authorization", "Bearer "+glmToken.Token)
+
+				client := &http.Client{Timeout: 10 * time.Second}
+				resp, err := client.Do(req)
+				if err == nil && resp.StatusCode == http.StatusOK {
+					defer resp.Body.Close()
+
+					var upstream struct {
+						Data []struct {
+							ID   string `json:"id"`
+							Name string `json:"name"`
+						} `json:"data"`
+					}
+					if json.NewDecoder(resp.Body).Decode(&upstream) == nil {
+						for _, m := range upstream.Data {
+							models = append(models, map[string]any{
+								"id":       m.ID,
+								"object":   "model",
+								"created":  time.Now().Unix(),
+								"owned_by": "zhipu",
+							})
+						}
 					}
 				}
 			}

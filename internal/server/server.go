@@ -74,7 +74,7 @@ func (s *Server) routes() {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	s.router.Get("/v1/models", ListModels(s.cfg))
+	s.router.Get("/v1/models", ListModels(s.cfg, s.tokenStore))
 	s.router.Post("/v1/chat/completions", s.handleChatCompletions())
 
 	s.router.Route("/auth/glm", func(r chi.Router) {
