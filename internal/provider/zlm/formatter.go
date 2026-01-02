@@ -112,8 +112,6 @@ func (f *Formatter) formatThinking(phase, content string) string {
 			content = reQuotePrefix.ReplaceAllString(content, "\n")
 		}
 		content = reSummary.ReplaceAllString(content, "")
-		content = reReasoningOpen.ReplaceAllString(content, "")
-		content = reReasoningClose.ReplaceAllString(content, "")
 
 	case "think":
 		if phase == "thinking" {
