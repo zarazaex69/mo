@@ -11,11 +11,14 @@ import (
 )
 
 type Token struct {
-	ID        string    `json:"id"`
-	Email     string    `json:"email"`
-	Token     string    `json:"token"`
-	CreatedAt time.Time `json:"created_at"`
-	IsActive  bool      `json:"is_active"`
+	ID           string    `json:"id"`
+	Provider     string    `json:"provider"`
+	Email        string    `json:"email"`
+	Token        string    `json:"token"`
+	RefreshToken string    `json:"refresh_token,omitempty"`
+	ExpiryDate   int64     `json:"expiry_date,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	IsActive     bool      `json:"is_active"`
 }
 
 type Store struct {
@@ -39,16 +42,22 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) Add(email, token string) (*Token, error) {
+	return s.AddWithProvider("glm", email, token, "", 0)
+}
+
+func (s *Store) AddWithProvider(provider, email, token, refreshToken string, expiryDate int64) (*Token, error) {
 	t := &Token{
-		ID:        uuid.New().String()[:8],
-		Email:     email,
-		Token:     token,
-		CreatedAt: time.Now(),
-		IsActive:  false,
+		ID:           uuid.New().String()[:8],
+		Provider:     provider,
+		Email:        email,
+		Token:        token,
+		RefreshToken: refreshToken,
+		ExpiryDate:   expiryDate,
+		CreatedAt:    time.Now(),
+		IsActive:     false,
 	}
 
-	// if this is first token, make it active
-	tokens, _ := s.List()
+	tokens, _ := s.ListByProvider(provider)
 	if len(tokens) == 0 {
 		t.IsActive = true
 	}
@@ -60,6 +69,10 @@ func (s *Store) Add(email, token string) (*Token, error) {
 	return t, nil
 }
 
+func (s *Store) Update(t *Token) error {
+	return s.save(t)
+}
+
 func (s *Store) Remove(id string) error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		return txn.Delete([]byte("token:" + id))
@@ -67,15 +80,19 @@ func (s *Store) Remove(id string) error {
 }
 
 func (s *Store) SetActive(id string) error {
-	tokens, err := s.List()
+	t, err := s.GetByID(id)
+	if err != nil || t == nil {
+		return fmt.Errorf("token not found")
+	}
+
+	tokens, err := s.ListByProvider(t.Provider)
 	if err != nil {
 		return err
 	}
 
-	// deactivate all, activate target
-	for _, t := range tokens {
-		t.IsActive = (t.ID == id)
-		if err := s.save(t); err != nil {
+	for _, tok := range tokens {
+		tok.IsActive = (tok.ID == id)
+		if err := s.save(tok); err != nil {
 			return err
 		}
 	}
@@ -84,7 +101,11 @@ func (s *Store) SetActive(id string) error {
 }
 
 func (s *Store) GetActive() (*Token, error) {
-	tokens, err := s.List()
+	return s.GetActiveByProvider("glm")
+}
+
+func (s *Store) GetActiveByProvider(provider string) (*Token, error) {
+	tokens, err := s.ListByProvider(provider)
 	if err != nil {
 		return nil, err
 	}
@@ -96,6 +117,32 @@ func (s *Store) GetActive() (*Token, error) {
 	}
 
 	return nil, nil
+}
+
+func (s *Store) GetByID(id string) (*Token, error) {
+	var token *Token
+
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte("token:" + id))
+		if err != nil {
+			return err
+		}
+
+		return item.Value(func(val []byte) error {
+			var t Token
+			if err := json.Unmarshal(val, &t); err != nil {
+				return err
+			}
+			token = &t
+			return nil
+		})
+	})
+
+	if err == badger.ErrKeyNotFound {
+		return nil, nil
+	}
+
+	return token, err
 }
 
 func (s *Store) List() ([]*Token, error) {
@@ -114,6 +161,9 @@ func (s *Store) List() ([]*Token, error) {
 				if err := json.Unmarshal(val, &t); err != nil {
 					return err
 				}
+				if t.Provider == "" {
+					t.Provider = "glm"
+				}
 				tokens = append(tokens, &t)
 				return nil
 			})
@@ -127,7 +177,27 @@ func (s *Store) List() ([]*Token, error) {
 	return tokens, err
 }
 
+func (s *Store) ListByProvider(provider string) ([]*Token, error) {
+	all, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+
+	var filtered []*Token
+	for _, t := range all {
+		if t.Provider == provider {
+			filtered = append(filtered, t)
+		}
+	}
+
+	return filtered, nil
+}
+
 func (s *Store) save(t *Token) error {
+	if t.Provider == "" {
+		t.Provider = "glm"
+	}
+
 	data, err := json.Marshal(t)
 	if err != nil {
 		return fmt.Errorf("marshal token: %w", err)
@@ -138,7 +208,6 @@ func (s *Store) save(t *Token) error {
 	})
 }
 
-// ValidateToken checks if token is valid by calling Z.ai API
 func ValidateToken(token string) bool {
 	req, err := http.NewRequest("GET", "https://chat.z.ai/api/v1/folders/", nil)
 	if err != nil {
@@ -157,6 +226,5 @@ func ValidateToken(token string) bool {
 	}
 	defer resp.Body.Close()
 
-	// 200 = valid, 401/403 = invalid
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }

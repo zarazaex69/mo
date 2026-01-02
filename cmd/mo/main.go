@@ -24,7 +24,6 @@ func main() {
 	flag.IntVar(&port, "p", 0, "server port (shorthand)")
 	flag.Parse()
 
-	// try default paths if not specified
 	if configPath == "" {
 		candidates := []string{
 			"configs/config.yaml",
@@ -45,7 +44,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// override port if specified
 	if port > 0 {
 		cfg.Server.Port = port
 	}

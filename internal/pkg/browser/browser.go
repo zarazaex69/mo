@@ -259,3 +259,147 @@ func (b *Browser) waitingPageHTML() string {
 	encoded := base64.StdEncoding.EncodeToString([]byte(waitingHTML))
 	return "data:text/html;base64," + encoded
 }
+
+func (b *Browser) RegisterQwen(email, password, name string) error {
+	page, err := stealth.Page(b.browser)
+	if err != nil {
+		return fmt.Errorf("create stealth page: %w", err)
+	}
+	b.page = page
+
+	page.MustSetViewport(2069, 1053, 1, false)
+	page.MustNavigate("https://chat.qwen.ai/auth")
+	page.MustWaitLoad()
+	time.Sleep(2 * time.Second)
+
+	signUpBtn, err := page.Timeout(10 * time.Second).Element(".qwenchat-auth-pc-switch-button")
+	if err != nil {
+		return fmt.Errorf("find sign up button: %w", err)
+	}
+	signUpBtn.MustClick()
+	time.Sleep(1 * time.Second)
+
+	if err := b.fill(`[placeholder="Enter Your Full Name"]`, name); err != nil {
+		return fmt.Errorf("fill name: %w", err)
+	}
+
+	if err := b.fill(`[placeholder="Enter Your Email"]`, email); err != nil {
+		return fmt.Errorf("fill email: %w", err)
+	}
+
+	if err := b.fill(`[placeholder="Enter Your Password"]`, password); err != nil {
+		return fmt.Errorf("fill password: %w", err)
+	}
+
+	if err := b.fill(`[placeholder="Enter Your Password Again"]`, password); err != nil {
+		return fmt.Errorf("fill confirm password: %w", err)
+	}
+
+	checkbox, err := page.Timeout(5 * time.Second).Element(".ant-checkbox-input")
+	if err == nil {
+		checkbox.MustClick()
+	}
+
+	log.Println("waiting for captcha to be solved...")
+
+	infoPage := b.browser.MustPage(b.waitingPageHTML())
+	time.Sleep(2 * time.Second)
+	infoPage.MustClose()
+	page.MustActivate()
+
+	if err := b.waitForQwenCaptcha(); err != nil {
+		return fmt.Errorf("captcha timeout: %w", err)
+	}
+
+	log.Println("captcha solved, clicking create account...")
+
+	submitBtn, err := page.Timeout(10 * time.Second).Element(".qwenchat-auth-pc-submit-button")
+	if err != nil {
+		return fmt.Errorf("find submit button: %w", err)
+	}
+	submitBtn.MustClick()
+
+	time.Sleep(3 * time.Second)
+	return nil
+}
+
+func (b *Browser) waitForQwenCaptcha() error {
+	timeout := time.After(3 * time.Minute)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-timeout:
+			return fmt.Errorf("captcha timeout after 3 minutes")
+		case <-ticker.C:
+			el, err := b.page.Timeout(100 * time.Millisecond).Element(".qwenchat-auth-pc-submit-button")
+			if err != nil {
+				continue
+			}
+			disabled, _ := el.Attribute("disabled")
+			if disabled == nil {
+				return nil
+			}
+		}
+	}
+}
+
+func (b *Browser) ActivateQwen(activationURL string) error {
+	if b.page == nil {
+		page, err := stealth.Page(b.browser)
+		if err != nil {
+			return fmt.Errorf("create stealth page: %w", err)
+		}
+		b.page = page
+		b.page.MustSetViewport(2069, 1053, 1, false)
+	}
+
+	b.page.MustNavigate(activationURL)
+	b.page.MustWaitLoad()
+	time.Sleep(3 * time.Second)
+
+	return nil
+}
+
+func (b *Browser) ConfirmQwenAuth(verificationURL string) error {
+	if b.page == nil {
+		page, err := stealth.Page(b.browser)
+		if err != nil {
+			return fmt.Errorf("create stealth page: %w", err)
+		}
+		b.page = page
+		b.page.MustSetViewport(2069, 1053, 1, false)
+	}
+
+	b.page.MustNavigate(verificationURL)
+	b.page.MustWaitLoad()
+	time.Sleep(3 * time.Second)
+
+	selectors := []string{
+		".qwen-chat-btn",
+		"button.qwen-chat-btn",
+		"[class*='confirm']",
+		"button[type='submit']",
+	}
+
+	var confirmBtn *rod.Element
+	var err error
+	for _, sel := range selectors {
+		confirmBtn, err = b.page.Timeout(5 * time.Second).Element(sel)
+		if err == nil && confirmBtn != nil {
+			break
+		}
+	}
+
+	if confirmBtn == nil {
+		confirmBtn, err = b.page.Timeout(10*time.Second).ElementR("button", "Confirm|确认|Allow")
+		if err != nil {
+			return fmt.Errorf("find confirm button: %w", err)
+		}
+	}
+
+	confirmBtn.MustClick()
+	time.Sleep(3 * time.Second)
+	return nil
+}

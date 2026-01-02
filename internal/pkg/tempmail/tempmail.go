@@ -162,3 +162,20 @@ func ExtractVerifyLink(text string) string {
 
 	return link
 }
+
+func ExtractQwenActivationLink(text string) string {
+	idx := strings.Index(text, "https://chat.qwen.ai/api/v1/auths/activate?")
+	if idx == -1 {
+		return ""
+	}
+
+	end := idx
+	for end < len(text) && text[end] != ' ' && text[end] != '\n' && text[end] != '\r' && text[end] != ')' {
+		end++
+	}
+
+	link := text[idx:end]
+	link = strings.ReplaceAll(link, "&amp;", "&")
+
+	return link
+}
