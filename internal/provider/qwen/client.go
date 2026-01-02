@@ -18,12 +18,30 @@ const (
 	BaseURL = "https://portal.qwen.ai/v1"
 )
 
+var supportedModels = []string{
+	"coder-model",
+	"vision-model",
+}
+
 type Client struct {
 	store *tokenstore.Store
 }
 
 func NewClient(store *tokenstore.Store) *Client {
 	return &Client{store: store}
+}
+
+func (c *Client) Name() string {
+	return "qwen"
+}
+
+func (c *Client) SupportsModel(model string) bool {
+	for _, m := range supportedModels {
+		if m == model {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) SendChatRequest(req *domain.ChatRequest, chatID string) (*http.Response, error) {

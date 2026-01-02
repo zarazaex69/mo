@@ -6,12 +6,9 @@ import (
 	"path/filepath"
 
 	"github.com/zarazaex69/mo/internal/config"
-	"github.com/zarazaex69/mo/internal/pkg/crypto"
 	"github.com/zarazaex69/mo/internal/pkg/logger"
 	"github.com/zarazaex69/mo/internal/pkg/utils"
-	"github.com/zarazaex69/mo/internal/provider/zlm"
 	"github.com/zarazaex69/mo/internal/server"
-	"github.com/zarazaex69/mo/internal/service/auth"
 )
 
 func main() {
@@ -50,12 +47,9 @@ func main() {
 
 	logger.Init(cfg.Server.Debug)
 
-	authSvc := auth.NewService()
-	sigGen := crypto.NewSignatureGenerator()
 	tokenizer := utils.NewTokenizer()
 
-	client := zlm.NewClient(cfg, authSvc, sigGen)
-	srv, err := server.New(cfg, client, tokenizer)
+	srv, err := server.New(cfg, tokenizer)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to init server")
 		os.Exit(1)

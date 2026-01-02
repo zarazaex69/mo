@@ -1,10 +1,7 @@
 package server
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,9 +9,11 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/zarazaex69/mo/internal/config"
+	"github.com/zarazaex69/mo/internal/pkg/crypto"
 	"github.com/zarazaex69/mo/internal/pkg/logger"
 	"github.com/zarazaex69/mo/internal/pkg/tokenstore"
 	"github.com/zarazaex69/mo/internal/pkg/utils"
+	"github.com/zarazaex69/mo/internal/provider"
 	"github.com/zarazaex69/mo/internal/provider/qwen"
 	"github.com/zarazaex69/mo/internal/provider/zlm"
 	"github.com/zarazaex69/mo/internal/service/auth"
@@ -23,13 +22,12 @@ import (
 type Server struct {
 	cfg        *config.Config
 	router     *chi.Mux
-	zlmClient  *zlm.Client
-	qwenClient *qwen.Client
+	providers  []provider.Provider
 	tokenizer  utils.Tokener
 	tokenStore *tokenstore.Store
 }
 
-func New(cfg *config.Config, client *zlm.Client, tokenizer utils.Tokener) (*Server, error) {
+func New(cfg *config.Config, tokenizer utils.Tokener) (*Server, error) {
 	dataPath := os.Getenv("MO_DATA_PATH")
 	if dataPath == "" {
 		home, _ := os.UserHomeDir()
@@ -43,13 +41,18 @@ func New(cfg *config.Config, client *zlm.Client, tokenizer utils.Tokener) (*Serv
 
 	auth.GetService().SetTokenStore(store)
 
-	qwenClient := qwen.NewClient(store)
+	authSvc := auth.NewService()
+	sigGen := crypto.NewSignatureGenerator()
+
+	providers := []provider.Provider{
+		qwen.NewClient(store),
+		zlm.NewClient(cfg, authSvc, sigGen),
+	}
 
 	s := &Server{
 		cfg:        cfg,
 		router:     chi.NewRouter(),
-		zlmClient:  client,
-		qwenClient: qwenClient,
+		providers:  providers,
 		tokenizer:  tokenizer,
 		tokenStore: store,
 	}
@@ -75,7 +78,7 @@ func (s *Server) routes() {
 	})
 
 	s.router.Get("/v1/models", ListModels(s.cfg, s.tokenStore))
-	s.router.Post("/v1/chat/completions", s.handleChatCompletions())
+	s.router.Post("/v1/chat/completions", ChatCompletions(s.cfg, s.providers, s.tokenizer))
 
 	s.router.Route("/auth/glm", func(r chi.Router) {
 		r.Post("/register", RegisterAccount(s.tokenStore))
@@ -92,31 +95,6 @@ func (s *Server) routes() {
 		r.Post("/tokens/{id}/activate", ActivateToken(s.tokenStore))
 		r.Get("/tokens/{id}/validate", ValidateTokenByID(s.tokenStore))
 	})
-}
-
-func (s *Server) handleChatCompletions() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		r.Body = io.NopCloser(bytes.NewReader(body))
-
-		var peek struct {
-			Model string `json:"model"`
-		}
-		json.Unmarshal(body, &peek)
-
-		if isQwenModel(peek.Model) {
-			r.Body = io.NopCloser(bytes.NewReader(body))
-			QwenChatCompletions(s.cfg, s.qwenClient, s.tokenizer)(w, r)
-			return
-		}
-
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		ChatCompletions(s.cfg, s.zlmClient, s.tokenizer)(w, r)
-	}
-}
-
-func isQwenModel(model string) bool {
-	return model == "coder-model" || model == "vision-model"
 }
 
 func (s *Server) Start() error {

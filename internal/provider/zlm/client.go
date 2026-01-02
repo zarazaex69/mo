@@ -19,6 +19,13 @@ import (
 	"github.com/zarazaex69/mo/internal/service/auth"
 )
 
+var supportedModels = []string{
+	"GLM-4-6-API-V1",
+	"GLM-4-Flash",
+	"GLM-4-Air",
+	"GLM-4-Plus",
+}
+
 type Client struct {
 	cfg    *config.Config
 	auth   auth.AuthServicer
@@ -31,6 +38,19 @@ func NewClient(cfg *config.Config, authSvc auth.AuthServicer, sigGen crypto.Sign
 		auth:   authSvc,
 		sigGen: sigGen,
 	}
+}
+
+func (c *Client) Name() string {
+	return "zlm"
+}
+
+func (c *Client) SupportsModel(model string) bool {
+	for _, m := range supportedModels {
+		if m == model {
+			return true
+		}
+	}
+	return !strings.HasPrefix(model, "coder-") && !strings.HasPrefix(model, "vision-")
 }
 
 func (c *Client) SendChatRequest(req *domain.ChatRequest, chatID string) (*http.Response, error) {
@@ -66,7 +86,6 @@ func (c *Client) SendChatRequest(req *domain.ChatRequest, chatID string) (*http.
 
 	lastMsg := extractLastUserMessage(req.Messages)
 
-	// sign the request
 	sigParams := map[string]string{
 		"requestId": reqID,
 		"timestamp": fmt.Sprintf("%d", ts),
@@ -105,7 +124,6 @@ func (c *Client) SendChatRequest(req *domain.ChatRequest, chatID string) (*http.
 		httpReq.Header.Set(k, v)
 	}
 
-	// no timeout for streaming
 	client := httpclient.New(0)
 	resp, err := client.Do(httpReq)
 	if err != nil {
@@ -113,7 +131,6 @@ func (c *Client) SendChatRequest(req *domain.ChatRequest, chatID string) (*http.
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		// read error body for debugging
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 
@@ -134,12 +151,10 @@ func extractLastUserMessage(msgs []domain.Message) string {
 			continue
 		}
 
-		// string content
 		if s, ok := msgs[i].Content.(string); ok {
 			return s
 		}
 
-		// multimodal array
 		if arr, ok := msgs[i].Content.([]interface{}); ok {
 			var texts []string
 			for _, item := range arr {

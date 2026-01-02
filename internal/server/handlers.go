@@ -17,15 +17,12 @@ import (
 	"github.com/zarazaex69/mo/internal/pkg/tokenstore"
 	"github.com/zarazaex69/mo/internal/pkg/utils"
 	"github.com/zarazaex69/mo/internal/pkg/validator"
+	"github.com/zarazaex69/mo/internal/provider"
 	"github.com/zarazaex69/mo/internal/provider/qwen"
 	"github.com/zarazaex69/mo/internal/provider/zlm"
 )
 
-type AIClient interface {
-	SendChatRequest(req *domain.ChatRequest, chatID string) (*http.Response, error)
-}
-
-func ChatCompletions(cfg *config.Config, client AIClient, tokenizer utils.Tokener) http.HandlerFunc {
+func ChatCompletions(cfg *config.Config, providers []provider.Provider, tokenizer utils.Tokener) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req domain.ChatRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -42,30 +39,53 @@ func ChatCompletions(cfg *config.Config, client AIClient, tokenizer utils.Tokene
 			req.Model = cfg.Model.Default
 		}
 
+		var p provider.Provider
+		for _, prov := range providers {
+			if prov.SupportsModel(req.Model) {
+				p = prov
+				break
+			}
+		}
+
+		if p == nil {
+			writeErr(w, http.StatusBadRequest, "unsupported model")
+			return
+		}
+
 		chatID := utils.GenerateRequestID()
 
 		logger.Info().
+			Str("provider", p.Name()).
 			Str("model", req.Model).
 			Bool("stream", req.Stream).
 			Int("messages", len(req.Messages)).
 			Msg("chat request")
 
-		resp, err := client.SendChatRequest(&req, chatID)
+		resp, err := p.SendChatRequest(&req, chatID)
 		if err != nil {
 			logger.Error().Err(err).Msg("request failed")
 			writeErr(w, http.StatusInternalServerError, "failed to process request")
 			return
 		}
 
-		if req.Stream {
-			streamResponse(w, resp, &req, cfg, tokenizer)
-		} else {
-			nonStreamResponse(w, resp, &req, cfg, tokenizer)
+		switch p.Name() {
+		case "qwen":
+			if req.Stream {
+				qwenStreamResponse(w, resp, &req, tokenizer)
+			} else {
+				qwenNonStreamResponse(w, resp, &req, tokenizer)
+			}
+		default:
+			if req.Stream {
+				zlmStreamResponse(w, resp, &req, cfg, tokenizer)
+			} else {
+				zlmNonStreamResponse(w, resp, &req, cfg, tokenizer)
+			}
 		}
 	}
 }
 
-func streamResponse(w http.ResponseWriter, resp *http.Response, req *domain.ChatRequest, cfg *config.Config, tokenizer utils.Tokener) {
+func zlmStreamResponse(w http.ResponseWriter, resp *http.Response, req *domain.ChatRequest, cfg *config.Config, tokenizer utils.Tokener) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeErr(w, http.StatusInternalServerError, "streaming not supported")
@@ -102,15 +122,12 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, req *domain.Chat
 			}
 		}
 
-		// check for tool call in delta
 		if tc, ok := delta["tool_call"].(string); ok {
 			toolCallBuffer += tc
 
-			// try to parse complete tool call
 			if parsed := zlm.ParseToolCall(toolCallBuffer); parsed != nil {
 				pendingToolCall = parsed
 
-				// send tool call chunk
 				chunk := domain.ChatResponse{
 					ID:      utils.GenerateChatCompletionID(),
 					Object:  "chat.completion.chunk",
@@ -133,9 +150,7 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, req *domain.Chat
 			continue
 		}
 
-		// regular content
 		content := getStr(delta, "content")
-		// strip any tool call blocks from content
 		if content != "" {
 			content = zlm.StripToolCallBlock(content)
 		}
@@ -146,7 +161,6 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, req *domain.Chat
 			ReasoningContent: getStr(delta, "reasoning_content"),
 		}
 
-		// skip empty deltas
 		if msg.Content == "" && msg.ReasoningContent == "" && msg.Role == "" {
 			continue
 		}
@@ -164,13 +178,11 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, req *domain.Chat
 		flusher.Flush()
 	}
 
-	// determine finish reason
 	finishReason := "stop"
 	if pendingToolCall != nil {
 		finishReason = "tool_calls"
 	}
 
-	// stop chunk
 	stop := domain.ChatResponse{
 		ID:      utils.GenerateChatCompletionID(),
 		Object:  "chat.completion.chunk",
@@ -186,7 +198,6 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, req *domain.Chat
 	fmt.Fprintf(w, "data: %s\n\n", data)
 	flusher.Flush()
 
-	// usage chunk
 	if includeUsage {
 		text := strings.Join(parts, "")
 		completionTokens := tokenizer.Count(text)
@@ -212,7 +223,7 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, req *domain.Chat
 	flusher.Flush()
 }
 
-func nonStreamResponse(w http.ResponseWriter, resp *http.Response, req *domain.ChatRequest, cfg *config.Config, tokenizer utils.Tokener) {
+func zlmNonStreamResponse(w http.ResponseWriter, resp *http.Response, req *domain.ChatRequest, cfg *config.Config, tokenizer utils.Tokener) {
 	var contentParts []string
 	var reasoningParts []string
 	var toolCallBuffer string
@@ -228,8 +239,6 @@ func nonStreamResponse(w http.ResponseWriter, resp *http.Response, req *domain.C
 		if c, ok := delta["content"].(string); ok {
 			c = zlm.StripToolCallBlock(c)
 			if c != "" {
-				// edit_content is just another chunk in non-stream mode
-				// don't replace, just append
 				contentParts = append(contentParts, c)
 			}
 		}
@@ -245,7 +254,6 @@ func nonStreamResponse(w http.ResponseWriter, resp *http.Response, req *domain.C
 		}
 	}
 
-	// parse accumulated tool calls
 	if toolCallBuffer != "" {
 		if parsed := zlm.ParseToolCall(toolCallBuffer); parsed != nil {
 			toolCalls = append(toolCalls, *parsed)
@@ -270,7 +278,6 @@ func nonStreamResponse(w http.ResponseWriter, resp *http.Response, req *domain.C
 		msg.Content = ""
 	}
 
-	// determine finish reason
 	finishReason := "stop"
 	if len(toolCalls) > 0 {
 		finishReason = "tool_calls"
@@ -298,326 +305,6 @@ func nonStreamResponse(w http.ResponseWriter, resp *http.Response, req *domain.C
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
-}
-
-func ListModels(cfg *config.Config, store *tokenstore.Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var models []map[string]any
-
-		qwenModels := []map[string]any{
-			{"id": "coder-model", "object": "model", "created": time.Now().Unix(), "owned_by": "qwen"},
-			{"id": "vision-model", "object": "model", "created": time.Now().Unix(), "owned_by": "qwen"},
-		}
-		models = append(models, qwenModels...)
-
-		glmToken, _ := store.GetActiveByProvider("glm")
-		if glmToken != nil {
-			url := fmt.Sprintf("%s//%s/api/models", cfg.Upstream.Protocol, cfg.Upstream.Host)
-
-			req, err := http.NewRequest("GET", url, nil)
-			if err == nil {
-				for k, v := range cfg.GetUpstreamHeaders() {
-					req.Header.Set(k, v)
-				}
-				req.Header.Set("Authorization", "Bearer "+glmToken.Token)
-
-				client := &http.Client{Timeout: 10 * time.Second}
-				resp, err := client.Do(req)
-				if err == nil && resp.StatusCode == http.StatusOK {
-					defer resp.Body.Close()
-
-					var upstream struct {
-						Data []struct {
-							ID   string `json:"id"`
-							Name string `json:"name"`
-						} `json:"data"`
-					}
-					if json.NewDecoder(resp.Body).Decode(&upstream) == nil {
-						for _, m := range upstream.Data {
-							models = append(models, map[string]any{
-								"id":       m.ID,
-								"object":   "model",
-								"created":  time.Now().Unix(),
-								"owned_by": "zhipu",
-							})
-						}
-					}
-				}
-			}
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"object": "list",
-			"data":   models,
-		})
-	}
-}
-
-func getStr(m map[string]any, key string) string {
-	if v, ok := m[key]; ok {
-		if s, ok := v.(string); ok {
-			return s
-		}
-	}
-	return ""
-}
-
-func writeErr(w http.ResponseWriter, code int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(domain.NewUpstreamError(code, msg))
-}
-
-func strPtr(s string) *string {
-	return &s
-}
-
-// RegisterAccount handles Z.ai account registration via browser automation
-func RegisterAccount(store *tokenstore.Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		logger.Info().Msg("starting account registration")
-
-		// create temp email
-		mail := tempmail.New()
-		email, err := mail.CreateEmail()
-		if err != nil {
-			logger.Error().Err(err).Msg("failed to create temp email")
-			writeErr(w, http.StatusInternalServerError, "failed to create temp email")
-			return
-		}
-		logger.Info().Str("email", email.Address).Msg("created temp email")
-
-		// generate password
-		password := crypto.GeneratePassword(16)
-		name := strings.Split(email.Address, "@")[0]
-
-		creds := browser.Credentials{
-			Email:    email.Address,
-			Password: password,
-			Name:     name,
-		}
-
-		// start browser (visible for captcha)
-		br, err := browser.New(false)
-		if err != nil {
-			logger.Error().Err(err).Msg("failed to start browser")
-			writeErr(w, http.StatusInternalServerError, "failed to start browser")
-			return
-		}
-		defer br.Close()
-
-		// register (user solves captcha manually)
-		if _, err := br.RegisterZAI(creds); err != nil {
-			logger.Error().Err(err).Msg("registration failed")
-			writeErr(w, http.StatusInternalServerError, "registration failed: "+err.Error())
-			return
-		}
-
-		logger.Info().Msg("waiting for verification email")
-
-		// wait for verification email
-		msg, err := mail.WaitForMessage(email.Address, "z.ai", "verify", 2*time.Minute, 3*time.Second)
-		if err != nil {
-			logger.Error().Err(err).Msg("failed to get verification email")
-			writeErr(w, http.StatusInternalServerError, "failed to get verification email")
-			return
-		}
-		if msg == nil {
-			logger.Error().Msg("verification email not received")
-			writeErr(w, http.StatusInternalServerError, "verification email not received")
-			return
-		}
-
-		logger.Info().Str("subject", msg.Subject).Msg("got verification email")
-
-		// extract verify link
-		link := tempmail.ExtractVerifyLink(msg.BodyText)
-		if link == "" {
-			link = tempmail.ExtractVerifyLink(msg.BodyHTML)
-		}
-		if link == "" {
-			logger.Error().Msg("verify link not found in email")
-			writeErr(w, http.StatusInternalServerError, "verify link not found")
-			return
-		}
-
-		logger.Info().Str("link", link).Msg("extracted verify link")
-
-		// verify email and get token
-		token, err := br.VerifyEmail(link, password)
-		if err != nil {
-			logger.Error().Err(err).Msg("email verification failed")
-			writeErr(w, http.StatusInternalServerError, "verification failed: "+err.Error())
-			return
-		}
-
-		// save to token store
-		saved, err := store.Add(email.Address, token)
-		if err != nil {
-			logger.Error().Err(err).Msg("failed to save token")
-			writeErr(w, http.StatusInternalServerError, "failed to save token")
-			return
-		}
-
-		logger.Info().Str("id", saved.ID).Msg("token saved to store")
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"success": true,
-			"token":   saved,
-		})
-	}
-}
-
-// ListTokens returns all tokens in the store
-func ListTokens(store *tokenstore.Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		tokens, err := store.List()
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "failed to list tokens")
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"tokens": tokens,
-		})
-	}
-}
-
-func ListTokensByProvider(store *tokenstore.Store, provider string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		tokens, err := store.ListByProvider(provider)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "failed to list tokens")
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"tokens": tokens,
-		})
-	}
-}
-
-// RemoveToken deletes a token by id
-func RemoveToken(store *tokenstore.Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := chi.URLParam(r, "id")
-		if id == "" {
-			writeErr(w, http.StatusBadRequest, "missing token id")
-			return
-		}
-
-		if err := store.Remove(id); err != nil {
-			writeErr(w, http.StatusInternalServerError, "failed to remove token")
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"success": true,
-		})
-	}
-}
-
-// ActivateToken sets a token as active
-func ActivateToken(store *tokenstore.Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := chi.URLParam(r, "id")
-		if id == "" {
-			writeErr(w, http.StatusBadRequest, "missing token id")
-			return
-		}
-
-		if err := store.SetActive(id); err != nil {
-			writeErr(w, http.StatusInternalServerError, "failed to activate token")
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"success": true,
-		})
-	}
-}
-
-// ValidateToken checks if a token is valid
-func ValidateTokenByID(store *tokenstore.Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := chi.URLParam(r, "id")
-		if id == "" {
-			writeErr(w, http.StatusBadRequest, "missing token id")
-			return
-		}
-
-		token, err := store.GetByID(id)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "failed to get token")
-			return
-		}
-		if token == nil {
-			writeErr(w, http.StatusNotFound, "token not found")
-			return
-		}
-
-		valid := false
-		if token.Provider == "glm" {
-			valid = tokenstore.ValidateToken(token.Token)
-		} else if token.Provider == "qwen" {
-			valid = !qwen.IsTokenExpired(token.ExpiryDate)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"id":       token.ID,
-			"provider": token.Provider,
-			"email":    token.Email,
-			"valid":    valid,
-		})
-	}
-}
-
-func QwenChatCompletions(cfg *config.Config, client *qwen.Client, tokenizer utils.Tokener) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req domain.ChatRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid json")
-			return
-		}
-
-		if err := validator.Validate(&req); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
-
-		if req.Model == "" {
-			req.Model = "coder-model"
-		}
-
-		chatID := utils.GenerateRequestID()
-
-		logger.Info().
-			Str("model", req.Model).
-			Bool("stream", req.Stream).
-			Int("messages", len(req.Messages)).
-			Msg("qwen chat request")
-
-		resp, err := client.SendChatRequest(&req, chatID)
-		if err != nil {
-			logger.Error().Err(err).Msg("qwen request failed")
-			writeErr(w, http.StatusInternalServerError, "failed to process request")
-			return
-		}
-		defer resp.Body.Close()
-
-		if req.Stream {
-			qwenStreamResponse(w, resp, &req, tokenizer)
-		} else {
-			qwenNonStreamResponse(w, resp, &req, tokenizer)
-		}
-	}
 }
 
 func qwenStreamResponse(w http.ResponseWriter, resp *http.Response, req *domain.ChatRequest, tokenizer utils.Tokener) {
@@ -778,6 +465,254 @@ func qwenNonStreamResponse(w http.ResponseWriter, resp *http.Response, req *doma
 	json.NewEncoder(w).Encode(response)
 }
 
+func ListModels(cfg *config.Config, store *tokenstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var models []map[string]any
+
+		qwenModels := []map[string]any{
+			{"id": "coder-model", "object": "model", "created": time.Now().Unix(), "owned_by": "qwen"},
+			{"id": "vision-model", "object": "model", "created": time.Now().Unix(), "owned_by": "qwen"},
+		}
+		models = append(models, qwenModels...)
+
+		glmToken, _ := store.GetActiveByProvider("glm")
+		if glmToken != nil {
+			url := fmt.Sprintf("%s//%s/api/models", cfg.Upstream.Protocol, cfg.Upstream.Host)
+
+			req, err := http.NewRequest("GET", url, nil)
+			if err == nil {
+				for k, v := range cfg.GetUpstreamHeaders() {
+					req.Header.Set(k, v)
+				}
+				req.Header.Set("Authorization", "Bearer "+glmToken.Token)
+
+				client := &http.Client{Timeout: 10 * time.Second}
+				resp, err := client.Do(req)
+				if err == nil && resp.StatusCode == http.StatusOK {
+					defer resp.Body.Close()
+
+					var upstream struct {
+						Data []struct {
+							ID   string `json:"id"`
+							Name string `json:"name"`
+						} `json:"data"`
+					}
+					if json.NewDecoder(resp.Body).Decode(&upstream) == nil {
+						for _, m := range upstream.Data {
+							models = append(models, map[string]any{
+								"id":       m.ID,
+								"object":   "model",
+								"created":  time.Now().Unix(),
+								"owned_by": "zhipu",
+							})
+						}
+					}
+				}
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"object": "list",
+			"data":   models,
+		})
+	}
+}
+
+func RegisterAccount(store *tokenstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		logger.Info().Msg("starting account registration")
+
+		mail := tempmail.New()
+		email, err := mail.CreateEmail()
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to create temp email")
+			writeErr(w, http.StatusInternalServerError, "failed to create temp email")
+			return
+		}
+		logger.Info().Str("email", email.Address).Msg("created temp email")
+
+		password := crypto.GeneratePassword(16)
+		name := strings.Split(email.Address, "@")[0]
+
+		creds := browser.Credentials{
+			Email:    email.Address,
+			Password: password,
+			Name:     name,
+		}
+
+		br, err := browser.New(false)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to start browser")
+			writeErr(w, http.StatusInternalServerError, "failed to start browser")
+			return
+		}
+		defer br.Close()
+
+		if _, err := br.RegisterZAI(creds); err != nil {
+			logger.Error().Err(err).Msg("registration failed")
+			writeErr(w, http.StatusInternalServerError, "registration failed: "+err.Error())
+			return
+		}
+
+		logger.Info().Msg("waiting for verification email")
+
+		msg, err := mail.WaitForMessage(email.Address, "z.ai", "verify", 2*time.Minute, 3*time.Second)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get verification email")
+			writeErr(w, http.StatusInternalServerError, "failed to get verification email")
+			return
+		}
+		if msg == nil {
+			logger.Error().Msg("verification email not received")
+			writeErr(w, http.StatusInternalServerError, "verification email not received")
+			return
+		}
+
+		logger.Info().Str("subject", msg.Subject).Msg("got verification email")
+
+		link := tempmail.ExtractVerifyLink(msg.BodyText)
+		if link == "" {
+			link = tempmail.ExtractVerifyLink(msg.BodyHTML)
+		}
+		if link == "" {
+			logger.Error().Msg("verify link not found in email")
+			writeErr(w, http.StatusInternalServerError, "verify link not found")
+			return
+		}
+
+		logger.Info().Str("link", link).Msg("extracted verify link")
+
+		token, err := br.VerifyEmail(link, password)
+		if err != nil {
+			logger.Error().Err(err).Msg("email verification failed")
+			writeErr(w, http.StatusInternalServerError, "verification failed: "+err.Error())
+			return
+		}
+
+		saved, err := store.Add(email.Address, token)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to save token")
+			writeErr(w, http.StatusInternalServerError, "failed to save token")
+			return
+		}
+
+		logger.Info().Str("id", saved.ID).Msg("token saved to store")
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"token":   saved,
+		})
+	}
+}
+
+func ListTokens(store *tokenstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tokens, err := store.List()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "failed to list tokens")
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"tokens": tokens,
+		})
+	}
+}
+
+func ListTokensByProvider(store *tokenstore.Store, prov string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tokens, err := store.ListByProvider(prov)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "failed to list tokens")
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"tokens": tokens,
+		})
+	}
+}
+
+func RemoveToken(store *tokenstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		if id == "" {
+			writeErr(w, http.StatusBadRequest, "missing token id")
+			return
+		}
+
+		if err := store.Remove(id); err != nil {
+			writeErr(w, http.StatusInternalServerError, "failed to remove token")
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+		})
+	}
+}
+
+func ActivateToken(store *tokenstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		if id == "" {
+			writeErr(w, http.StatusBadRequest, "missing token id")
+			return
+		}
+
+		if err := store.SetActive(id); err != nil {
+			writeErr(w, http.StatusInternalServerError, "failed to activate token")
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+		})
+	}
+}
+
+func ValidateTokenByID(store *tokenstore.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		if id == "" {
+			writeErr(w, http.StatusBadRequest, "missing token id")
+			return
+		}
+
+		token, err := store.GetByID(id)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "failed to get token")
+			return
+		}
+		if token == nil {
+			writeErr(w, http.StatusNotFound, "token not found")
+			return
+		}
+
+		valid := false
+		switch token.Provider {
+		case "glm":
+			valid = tokenstore.ValidateToken(token.Token)
+		case "qwen":
+			valid = !qwen.IsTokenExpired(token.ExpiryDate)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":       token.ID,
+			"provider": token.Provider,
+			"email":    token.Email,
+			"valid":    valid,
+		})
+	}
+}
+
 func RegisterQwenAccount(store *tokenstore.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		logger.Info().Msg("starting qwen account registration")
@@ -860,7 +795,7 @@ func RegisterQwenAccount(store *tokenstore.Store) http.HandlerFunc {
 		}
 
 		var token *qwen.OAuthToken
-		for i := 0; i < 20; i++ {
+		for range 20 {
 			time.Sleep(3 * time.Second)
 			token, err = qwen.PollForToken(deviceCode.DeviceCode, deviceCode.CodeVerifier)
 			if err != nil {
@@ -894,4 +829,23 @@ func RegisterQwenAccount(store *tokenstore.Store) http.HandlerFunc {
 			"token":   saved,
 		})
 	}
+}
+
+func getStr(m map[string]any, key string) string {
+	if v, ok := m[key]; ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+func writeErr(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(domain.NewUpstreamError(code, msg))
+}
+
+func strPtr(s string) *string {
+	return &s
 }
